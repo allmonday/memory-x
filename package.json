@@ -2,8 +2,11 @@
   "name": "memory-x",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "test": "node --test packages/core/tests/*.test.ts"
+    "test": "node --test packages/core/tests/*.test.ts",
+    "crash-verify": "node scripts/crash-verify.ts"
   }
 }
