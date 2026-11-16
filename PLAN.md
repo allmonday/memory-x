@@ -238,13 +238,13 @@ session_before_compact
 ## 7. 里程碑
 
 ### M0 — 核心库骨架（~3 天）
-- [ ] 仓库初始化（目录见 §9），TS strict + vitest
-- [ ] Markdown 文法解析/序列化，往返稳定 fuzz（50 随机树）
-- [ ] 路径寻址 + `[n]` 消歧 + 末段模糊匹配
-- [ ] 原子写（kill -9 注入测试：写中途杀进程，文件不损）
-- [ ] proper-lockfile 集成
-- [ ] GitSnapshot：自动 init/commit
-- **DoD**：单测全绿；手工 smoke（脚本改树 → git log 可见历史）
+- [x] 仓库初始化（目录见 §9），TS strict + node:test（零依赖，strip-types 直跑）
+- [x] Markdown 文法解析/序列化，往返稳定 fuzz（50 随机树）
+- [x] 路径寻址 + `[n]` 消歧 + 末段模糊匹配（编辑距离）
+- [x] 原子写（`npm run crash-verify`：写入中 SIGKILL，文件不损、无 .tmp 残留）
+- [ ] proper-lockfile 集成（跨进程锁，延至 M1 前）
+- [x] GitSnapshot：自动 init/commit
+- **DoD**：✅ 单测全绿（23/23）；✅ 手工 smoke（upsert→git log 可见历史）
 
 ### M1 — pi 扩展最小闭环（~2 天 + 狗粮一周）
 - [ ] 扩展包脚手架，5 个工具注册
