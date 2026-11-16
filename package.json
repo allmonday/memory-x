@@ -1,0 +1,9 @@
+{
+  "name": "memory-x",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "test": "node --test packages/core/tests/*.test.ts"
+  }
+}
