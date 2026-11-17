@@ -32,3 +32,36 @@ export function tocDigest(root: MemoryNode, opts: TocOptions = {}): string {
   if (out.length > maxChars) out = `${out.slice(0, maxChars)}\n…（已截断，用 memory_read 下钻）`;
   return out;
 }
+
+export interface DumpOptions {
+  /** 包含叶子事实（默认只出结构） */
+  full?: boolean;
+}
+
+/**
+ * 整树导出（box-drawing 结构视图，全深度）。
+ * `◆` 标记该节点有完整信息（content）。用于 /memory dump。
+ */
+export function dumpTree(root: MemoryNode, opts: DumpOptions = {}): string {
+  const lines: string[] = ["# Memory"];
+
+  const countLeaves = (n: MemoryNode): number =>
+    n.leaves.length + n.children.reduce((s, c) => s + countLeaves(c), 0);
+
+  const walk = (children: MemoryNode[], prefix: string) => {
+    children.forEach((c, i) => {
+      const last = i === children.length - 1;
+      const branch = last ? "└─ " : "├─ ";
+      const childPrefix = prefix + (last ? "   " : "│  ");
+      const total = countLeaves(c);
+      const mark = c.content != null ? " ◆" : "";
+      lines.push(`${prefix}${branch}${c.title}${total > 0 ? ` [${total}]` : ""}${mark}`);
+      if (opts.full) {
+        for (const leaf of c.leaves) lines.push(`${childPrefix}  · ${leaf}`);
+      }
+      walk(c.children, childPrefix);
+    });
+  };
+  walk(root.children, "");
+  return lines.join("\n");
+}

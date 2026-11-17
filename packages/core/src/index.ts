@@ -1,7 +1,7 @@
 export { MemoryFile, MEMORY_FILE } from "./memory-file.ts";
 export { parseMarkdown, ParseError, ROOT_TITLE, MAX_DEPTH } from "./parser.ts";
 export { serializeMarkdown, serializeSubtree } from "./serializer.ts";
-export { tocDigest, type TocOptions } from "./digest.ts";
+export { tocDigest, dumpTree, type TocOptions, type DumpOptions } from "./digest.ts";
 export { parseFragment, applyOutline } from "./fragment.ts";
 export { withDirLock } from "./lock.ts";
 export { MemoryStore, STORE_DIR, DB_FILE } from "./store.ts";

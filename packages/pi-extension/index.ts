@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   MemoryFile,
+  dumpTree,
   tocDigest,
 } from "../core/src/index.ts";
 
@@ -182,14 +183,30 @@ export default function memoryExtension(pi: any): void {
   // ---------- 命令 ----------
 
   pi.registerCommand("memory", {
-    description: "Memory X：/memory 查看目录，/memory stats 查看统计",
+    description: "Memory X：/memory 目录 | /memory stats 统计 | /memory dump [文件] [--full] 导出树",
     handler: async (args: string, ctx: any) => {
       const m = await memory();
-      if (args.trim() === "stats") {
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+
+      if (tokens[0] === "stats") {
         const s = collectStats(m.root);
         ctx.ui.notify(`节点 ${s.nodes} / 叶子 ${s.leaves} / 深度 ${s.depth} · ${MEMORY_DIR}`, "info");
         return;
       }
+
+      if (tokens[0] === "dump") {
+        const full = tokens.includes("--full");
+        const fileArg = tokens.slice(1).find((t) => !t.startsWith("--"));
+        const { writeFile } = await import("node:fs/promises");
+        const { resolve } = await import("node:path");
+        const target = resolve(fileArg ?? "memory-tree.txt");
+        const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+        const body = dumpTree(m.root, { full });
+        await writeFile(target, `# Memory X tree dump — ${stamp}${full ? "（含叶子）" : ""}\n\n${body}\n`, "utf8");
+        ctx.ui.notify(`已导出 ${full ? "完整树（含叶子）" : "结构树"} → ${target}`, "info");
+        return;
+      }
+
       ctx.ui.notify(`记忆目录（${MEMORY_DIR}）：\n${tocDigest(m.root)}`, "info");
     },
   });
