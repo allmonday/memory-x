@@ -247,9 +247,10 @@ session_before_compact
 - **DoD**：✅ 单测全绿（23/23）；✅ 手工 smoke（upsert→git log 可见历史）
 
 ### M1 — pi 扩展最小闭环（~2 天 + 狗粮一周）
-- [ ] 扩展包脚手架，5 个工具注册
-- [ ] tocDigest 注入（context_with_system）
-- [ ] 手动写入工作流可用（模型在对话中主动 upsert）
+- [x] 扩展包脚手架，5 个工具注册（read / upsert / move / apply_outline / stats；search 属 M3）
+- [x] tocDigest 注入（`before_agent_start` → `systemPromptOptions.sections.memory`，即 <memory> XML 段）
+- [x] 手动写入工作流可用（E2E：pi --print 实测 upsert/read/幂等均通过，git 快照正确）
+- [x] M0 遗留：跨进程锁（零依赖 O_EXCL 实现，替代 proper-lockfile，含残留锁接管）
 - [ ] 狗粮：真实日常使用 ≥1 周，收集格式工效学问题
 - **DoD**：一周内零格式破坏事故；至少 30 条真实记忆入库
 
