@@ -22,6 +22,12 @@ export function serializeSubtree(node: MemoryNode, level = 2): string {
 function writeBlock(out: string[], node: MemoryNode, depth: number) {
   out.push(`${"#".repeat(depth + 1)} ${node.title}`);
   for (const leaf of node.leaves) out.push(`- ${leaf}`);
+  if (node.content != null) {
+    if (node.content.includes("\n```\n") || node.content.startsWith("```") || node.content.endsWith("```")) {
+      throw new Error(`节点 "${node.title}" 的 content 含围栏行，无法序列化`);
+    }
+    out.push("", "```", node.content, "```");
+  }
   out.push("");
   for (const child of node.children) writeBlock(out, child, depth + 1);
 }

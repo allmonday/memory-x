@@ -15,6 +15,7 @@ export class ParseError extends Error {
 
 const HEADING_RE = /^(#{1,6}) (.+)$/;
 const BULLET_RE = /^- (.+)$/;
+const FENCE = "```";
 /** 标题禁用字符：'/'（路径分隔）、'['（消歧语法） */
 const TITLE_FORBIDDEN = /[/[]/;
 
@@ -25,6 +26,7 @@ const TITLE_FORBIDDEN = /[/[]/;
  * - `# Memory` 唯一根
  * - `##`..`######` 标题 = 结构节点，层级不允许跳跃（如 H2 后直接 H4）
  * - `- xxx` 列表 = 当前节点的叶子事实
+ * - ``` fenced block = 当前节点的完整信息（content），块内为原文
  * - 空行 = 分隔，无语义
  */
 export function parseMarkdown(md: string): MemoryNode {
@@ -34,9 +36,30 @@ export function parseMarkdown(md: string): MemoryNode {
   let sawRoot = false;
 
   const lines = md.split("\n");
+  let inFence = false;
+  const contentLines: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trimEnd();
+
+    if (inFence) {
+      if (line === FENCE) {
+        stack[stack.length - 1]!.content = contentLines.join("\n");
+        inFence = false;
+      } else {
+        contentLines.push(lines[i]!); // fence 内保留原始行（不 trimEnd）
+      }
+      continue;
+    }
     if (line === "") continue;
+
+    if (line === FENCE) {
+      if (!sawRoot || stack.length < 2) {
+        throw new ParseError("content 块必须位于结构节点标题之下", i + 1);
+      }
+      inFence = true;
+      contentLines.length = 0;
+      continue;
+    }
 
     const h = HEADING_RE.exec(line);
     if (h) {
@@ -82,6 +105,7 @@ export function parseMarkdown(md: string): MemoryNode {
   }
 
   if (!sawRoot) throw new ParseError(`缺少根标题 "# ${ROOT_TITLE}"`, lines.length);
+  if (inFence) throw new ParseError("content 块未闭合", lines.length);
   return root;
 }
 
