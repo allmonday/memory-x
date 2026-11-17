@@ -7,12 +7,21 @@ import type { MemoryNode } from "./types.ts";
  */
 export function serializeMarkdown(root: MemoryNode): string {
   const out: string[] = [`# ${root.title}`, ""];
-  const walk = (node: MemoryNode, level: number) => {
-    out.push(`${"#".repeat(level + 1)} ${node.title}`);
-    for (const leaf of node.leaves) out.push(`- ${leaf}`);
-    out.push("");
-    for (const child of node.children) walk(child, level + 1);
-  };
-  for (const child of root.children) walk(child, 1);
+  for (const child of root.children) writeBlock(out, child, 1);
   return out.join("\n");
+}
+
+/** 序列化子树片段（无根标题），level 为该节点对应的标题层级（2 = ##）。 */
+export function serializeSubtree(node: MemoryNode, level = 2): string {
+  if (level > 6) throw new Error(`子树层级超出 H6："${node.title}"`);
+  const out: string[] = [];
+  writeBlock(out, node, level - 1);
+  return out.join("\n");
+}
+
+function writeBlock(out: string[], node: MemoryNode, depth: number) {
+  out.push(`${"#".repeat(depth + 1)} ${node.title}`);
+  for (const leaf of node.leaves) out.push(`- ${leaf}`);
+  out.push("");
+  for (const child of node.children) writeBlock(out, child, depth + 1);
 }

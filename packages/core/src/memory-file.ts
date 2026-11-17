@@ -1,11 +1,14 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.ts";
+import { tocDigest, type TocOptions } from "./digest.ts";
 import { snapshot } from "./git.ts";
+import { applyOutline } from "./fragment.ts";
+import { withDirLock } from "./lock.ts";
 import { deleteNode, moveNode, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
 import { resolvePath } from "./path.ts";
-import { serializeMarkdown } from "./serializer.ts";
+import { serializeMarkdown, serializeSubtree } from "./serializer.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
 
 export const MEMORY_FILE = "MEMORY.md";
@@ -43,6 +46,22 @@ export class MemoryFile {
     return resolvePath(this.root, path, { fuzzy: true });
   }
 
+  /** 子树的 markdown 片段（无根标题）。 */
+  renderSection(path: string): string | null {
+    const r = this.readSection(path);
+    return r ? serializeSubtree(r.node) : null;
+  }
+
+  tocDigest(opts?: TocOptions): string {
+    return tocDigest(this.root, opts);
+  }
+
+  async applyOutline(path: string, outline: string): Promise<OpResult> {
+    const r = applyOutline(this.root, path, outline);
+    if (!r.changed) return { ok: true, path: r.resolvedPath, revision: null, changed: false };
+    return this.persist("apply_outline", r.resolvedPath);
+  }
+
   async upsertNode(path: string, leaf: string): Promise<OpResult> {
     const r = upsertNode(this.root, path, leaf);
     if (!r.changed) return { ok: true, path: r.resolvedPath, revision: null, changed: false };
@@ -65,8 +84,10 @@ export class MemoryFile {
 
   private async persist(op: string, path: string): Promise<OpResult> {
     await mkdir(this.dir, { recursive: true });
-    await atomicWriteFile(this.filePath, serializeMarkdown(this.root));
-    const revision = await snapshot(this.dir, `memory: ${op} ${path}`);
+    const revision = await withDirLock(this.dir, async () => {
+      await atomicWriteFile(this.filePath, serializeMarkdown(this.root));
+      return snapshot(this.dir, `memory: ${op} ${path}`);
+    });
     return { ok: true, path, revision, changed: true };
   }
 }
