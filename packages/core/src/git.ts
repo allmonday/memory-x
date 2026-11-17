@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { realpath } from "node:fs/promises";
 
 function git(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -14,11 +15,20 @@ function git(cwd: string, args: string[]): Promise<string> {
   });
 }
 
-/** 确保 dir 是 git 仓库（不是则 init）。 */
+/**
+ * 确保 dir 是它自己的 git 仓库。
+ * 不能只看 rev-parse 是否成功——git 会向上.walk 找到父仓库，
+ * 嵌套在其它仓库里的目录会被误判，导致快照提交进父仓库。
+ * 因此用 --show-toplevel 严格比对仓库根是否就是 dir 本身。
+ */
 export async function ensureGitRepo(dir: string): Promise<void> {
+  let toplevel: string | null = null;
   try {
-    await git(dir, ["rev-parse", "--git-dir"]);
+    toplevel = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
   } catch {
+    // 不是 git 仓库
+  }
+  if (toplevel === null || (await realpath(toplevel)) !== (await realpath(dir))) {
     await git(dir, ["init"]);
   }
 }
