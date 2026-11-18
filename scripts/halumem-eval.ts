@@ -27,7 +27,7 @@ const URL = "https://huggingface.co/datasets/IAAR-Shanghai/HaluMem/resolve/main/
 const RECORDS = Number(arg("records") ?? "1");
 const SESSIONS = Number(arg("sessions") ?? "8");
 const QPS = Number(arg("qps") ?? "0"); // 每 session 最多几题；0=不限
-const MODE = (arg("mode") ?? "llm") as "llm" | "mechanical";
+const MODE = (arg("mode") ?? "llm") as "llm" | "mechanical" | "llm-update";
 const RUN_DIR = resolve("eval/halumem/runs", new Date().toISOString().replace(/[:.]/g, "-"));
 
 async function datasetPath(): Promise<string> {
@@ -47,8 +47,9 @@ const path = await datasetPath();
 const lines = (await readFile(path, "utf8")).split("\n").filter((l) => l.trim());
 const records = lines.slice(0, RECORDS).map((l) => JSON.parse(l) as HaluMemRecord);
 
-const llm = MODE === "llm" ? LlmClient.fromEnv(arg("model")) : null;
-console.log(`数据集：${path}\n模式：${MODE === "llm" ? "LLM 抽取" : "机械建树"} · 记录 ${records.length} · 每记录前 ${SESSIONS} sessions${llm ? ` · 模型 ${llm.model}` : ""}\n`);
+const llm = MODE === "mechanical" ? null : LlmClient.fromEnv(arg("model"));
+const MODE_LABEL = MODE === "llm-update" ? "LLM 更新感知" : MODE === "llm" ? "LLM 抽取" : "机械建树";
+console.log(`数据集：${path}\n模式：${MODE_LABEL} · 记录 ${records.length} · 每记录前 ${SESSIONS} sessions${llm ? ` · 模型 ${llm.model}` : ""}\n`);
 
 await mkdir(RUN_DIR, { recursive: true });
 const tagAgg: Record<string, { pass: number; total: number }> = {};
