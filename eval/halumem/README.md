@@ -31,15 +31,24 @@ npm run eval:halumem -- --qps 3                        # 每 session 最多 3 �
 许可 CC-BY-NC-ND-4.0（禁止再分发/演绎），因此从缓存或上游读取：
 `--data <path>` → `$HALUMEM_DATA` → `~/.cache/memory-x/halumem/HaluMem-Medium.jsonl` → 从 HuggingFace 下载。
 
-## 首次跑（2026-11-18，记录 1 前 3 个 session，9 题）
+## 首跑（2026-11-18，记录 1 完整 65 个 session，164 题）
 
 ```
-抽取 recall 0.930   precision 0.000
-问答 7/9   ← Memory Boundary 2/2 · Basic Fact Recall 3/3 · Memory Conflict 2/4
+抽取 recall 1.000   precision 0.000
+问答 97/164 = 0.591
+  Memory Boundary              36/39  0.923   对抗/拒绝
+  Basic Fact Recall            25/40  0.625   基本召回
+  Memory Conflict              19/39  0.487   冲突消解
+  Generalization & Application 11/31  0.355   泛化/应用（弱）
+  Multi-hop Inference           5/9   0.556   多跳
+  Dynamic Update                1/6   0.167   动态更新（最弱）
 ```
+393 次调用 · 127 万 token · 20.5 分钟。
 
-- **抽取 recall 高**：LLM 抽取基本覆盖了黄金记忆点；
-- **precision 0**：`original_memories`（旧值）仍未被替换 → 印证 **supersede 缺口（M2）**；
-- **Memory Conflict 最弱**：冲突消解是当前短板，与示例场景结论一致。
+**读出来的信号**：
+- **抽取 recall 高 / precision 0**：LLM 基本抽全了黄金点，但 `original_memories`（旧值）没被替换 → **supersede 缺口（M2）**；
+- **Dynamic Update 0.167、Memory Conflict 0.487**：更新与冲突消解是当前最大短板，与示例场景结论一致；
+- **Generalization & Application 0.355**：泛化/应用弱；
+- **Memory Boundary 0.923**：对抗题（该拒绝）表现好，不乱编。
 
-> 样本很小（3 session / 9 题），只作跑通与方向参考。放大 `--sessions/--records` 才有统计意义。
+> ⚠️ 两个口径提醒：① 抽取判定是"内容 token 重叠"的粗判，recall 1.0 偏高；② 仅 1 条记录，只作方向参考。要统计意义需跑更多记录。
