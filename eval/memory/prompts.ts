@@ -49,9 +49,15 @@ export function supersedeUser(memoryLines: string, facts: string[]): string {
   return `当前记忆：\n${memoryLines || "（空）"}\n\n本轮新抽出的事实：\n${facts.map((f) => `- ${f}`).join("\n")}\n\n请输出写操作。`;
 }
 
-export const ANSWER_SYSTEM =
-  "You answer questions using ONLY the retrieved memory excerpts. Combine facts across excerpts. " +
-  "Be concise. If the excerpts contain relevant information, answer from them; otherwise say you don't know.";
+/** 答题提示词：关键是不被"确切日期/版本缺失"卡住——证据在就答，否定性事实也算证据。 */
+export const ANSWER_SYSTEM = [
+  "Answer the question using ONLY the retrieved memory excerpts.",
+  "- If ANY excerpt contains information about the asked subject, answer from it; do NOT reply 'I don't know' merely because the exact date/version is missing.",
+  "- For yes/no questions, commit to Yes or No from the evidence. A stored dislike/negative fact counts: if memory says he dislikes X, then 'did he prefer X?' = No.",
+  "- If excerpts conflict, prefer the most recent / updated fact and ignore outdated ones.",
+  "- Combine facts across excerpts; be concise and specific (names, dates, numbers).",
+  "- Only say 'I don't know' if NO excerpt contains anything about the subject.",
+].join("\n");
 
 export function answerUser(context: string, question: string): string {
   return `Retrieved memory:\n${context}\n\nQuestion: ${question}\n\nAnswer concisely:`;
