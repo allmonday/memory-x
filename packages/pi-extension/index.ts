@@ -34,6 +34,12 @@ const READ_MAX_CHARS = 6000;
 /** 自动召回注入阈值：综合分低于此不注入（减噪；MEMORY_X_INJECT_MIN 可调） */
 const AUTO_INJECT_MIN_SCORE = Number(process.env.MEMORY_X_INJECT_MIN ?? "1.0");
 
+/**
+ * 记忆写入规范（借 ASD-STE 原则）：短句、一句一事、主动语态、术语一致、去修饰；
+ * 保留人名/日期/数字/专有名词；原文或摘要重要时用引用块（> …）原样保留，不要改写。
+ */
+const WRITE_STYLE = "短句、一句一事、主动语态、术语一致、去修饰；保留人名/日期/数字/专有名词；原文或摘要重要时用引用块（> …）原样保留。";
+
 let cache: MemoryFile | null = null;
 
 // ---------- 整理（做梦）模式状态 ----------
@@ -181,6 +187,7 @@ export default function memoryExtension(pi: any): void {
     promptSnippet: "写入一条长期记忆",
     promptGuidelines: [
       "Use memory_upsert when the conversation produces a conclusion, decision, entity relation, or long-term todo worth keeping across sessions. One fact per call; timestamp with today's date in the leaf text.",
+      "Write in the memory write style: short sentences, one fact per leaf, active voice, consistent terms, no vague words. Keep names, dates, and numbers. If the original wording matters, keep it verbatim as a quote (> …).",
     ],
     parameters: {
       type: "object",
@@ -243,7 +250,7 @@ export default function memoryExtension(pi: any): void {
     name: "memory_write_note",
     label: "写节点完整信息",
     description:
-      "写入/更新节点的「完整信息」（content，RAG 语料）。当某节点信息量超出一条叶子（长正文、结构化说明、清单、对比、步骤、代码）时用它。请用 Markdown 组织（标题/列表/表格/引用/行内代码/围栏代码），UI 会按 Markdown 渲染；不要把长正文塞进叶子。",
+      "写入/更新节点的「完整信息」（content，RAG 语料）。当某节点信息量超出一条叶子（长正文、结构化说明、清单、对比、步骤、代码）时用它。请用 Markdown 组织（标题/列表/表格/引用/行内代码/围栏代码），UI 会按 Markdown 渲染；不要把长正文塞进叶子。遵守写入规范：短句、一句一事、术语一致、去修饰；原文或摘要重要时用引用块（> …）原样保留。",
     promptSnippet: "写入节点完整信息（Markdown 正文）",
     promptGuidelines: [
       "Use memory_write_note for a node's long-form body (the ◆ 完整信息), not memory_upsert — leaves are one-line facts only.",
@@ -447,6 +454,7 @@ export default function memoryExtension(pi: any): void {
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
       "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；重构用 memory_apply_outline；勿猜路径。",
+      `写入规范：${WRITE_STYLE}`,
     ].join("\n");
 
     // 召回段（独立 section）：每轮随 prompt 变化，但只重发这小块，不动大段。

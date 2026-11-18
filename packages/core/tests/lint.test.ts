@@ -56,3 +56,20 @@ test("suggestPath：无重合返回空", () => {
   const root = parseMarkdown("# Memory\n\n## 工作\n- x\n");
   assert.deepEqual(suggestPath(root, "完全无关的内容"), []);
 });
+
+test("lint：写入规范（长句/含糊/一句多事）", () => {
+  const long = "这是一条非常冗长的叶子事实，它同时包含了很多不同的信息点，比如具体的时间、准确的地点、相关的人物，以及后续一段较长的行动计划与责任分工说明";
+  const vague = "用户大概会在下个月左右完成迁移";
+  const multi = "用户改用 Postgres；数据库迁移完成";
+  const root = parseMarkdown(`# Memory\n\n## 工作\n### 迁移\n- ${long}\n- ${vague}\n- ${multi}\n`);
+  const issues = lintTree(root);
+  assert.ok(issues.some((i) => i.rule === "style-long"));
+  assert.ok(issues.some((i) => i.rule === "style-vague"));
+  assert.ok(issues.some((i) => i.rule === "style-multi"));
+});
+
+test("lint：长 content 无引用块 → 提示保留原文", () => {
+  const root = parseMarkdown("# Memory\n\n## 工作\n### 调研\n- 事实\n");
+  root.children[0]!.children[0]!.content = "很长的正文。".repeat(40); // >200 字，无 >
+  assert.ok(lintTree(root).some((i) => i.rule === "style-quote"));
+});

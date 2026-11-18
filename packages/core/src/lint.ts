@@ -18,9 +18,13 @@ export interface LintOptions {
   maxLeaves?: number;
   /** 顶层域上限（骨架克制） */
   maxTopDomains?: number;
+  /** 叶子字符数上限（写入规范：短句） */
+  maxLeafChars?: number;
 }
 
 const TIME_NAME_RE = /(19|20)\d{2}\s*年|第?[1-4]季度|\bQ[1-4]\b/;
+/** 含糊/修饰词（写入规范：去修饰） */
+const VAGUE_RE = /(大约|大概|可能|也许|似乎|非常|很多|一些|尽量|基本上|差不多|左右|或许|应该会)/;
 
 /**
  * 结构体检：目录最佳实践的机器可判定子集。
@@ -33,6 +37,7 @@ export function lintTree(root: MemoryNode, opts: LintOptions = {}): LintIssue[] 
   const maxChildren = opts.maxChildren ?? 9;
   const maxLeaves = opts.maxLeaves ?? 20;
   const maxTopDomains = opts.maxTopDomains ?? 7;
+  const maxLeafChars = opts.maxLeafChars ?? 60;
 
   const issues: LintIssue[] = [];
 
@@ -106,6 +111,22 @@ export function lintTree(root: MemoryNode, opts: LintOptions = {}): LintIssue[] 
         path,
         message: `稳定层含时间性命名「${node.title}」——会腐烂；时间放叶子的 ← 日期 标注，不进结构`,
       });
+    }
+
+    // 写入规范（借 STE）：短句 / 一句一事 / 去修饰；原文重要时引用保留
+    for (const lf of node.leaves) {
+      if (lf.length > maxLeafChars) {
+        issues.push({ level: "info", rule: "style-long", path, message: `叶子偏长（${lf.length} 字，建议 ≤${maxLeafChars}）——拆成短句：${lf.slice(0, 24)}…` });
+      }
+      if (VAGUE_RE.test(lf)) {
+        issues.push({ level: "info", rule: "style-vague", path, message: `叶子含含糊/修饰词——去修饰、写确定事实：${lf.slice(0, 24)}…` });
+      }
+      if (lf.includes("；") || (lf.match(/，/g)?.length ?? 0) >= 2) {
+        issues.push({ level: "info", rule: "style-multi", path, message: `叶子疑似一句多事——一条一事拆分：${lf.slice(0, 24)}…` });
+      }
+    }
+    if (node.content && node.content.length > 200 && !node.content.split("\n").some((l) => l.trimStart().startsWith(">"))) {
+      issues.push({ level: "info", rule: "style-quote", path, message: "content 较长但无引用块——若含重要原文/摘要，用 `> …` 原样保留以免改写失真" });
     }
 
     // 兄弟重名
