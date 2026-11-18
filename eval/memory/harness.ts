@@ -15,7 +15,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { MemoryFile } from "../../packages/core/src/index.ts";
 import { LlmClient } from "../llm.ts";
-import { ANSWER_SYSTEM, EXTRACT_SYSTEM, JUDGE_SYSTEM, REFUSE_SYSTEM, UPDATE_SYSTEM, answerUser, extractUser, judgeUser, refuseUser, updateUser } from "./prompts.ts";
+import { ANSWER_SYSTEM, EXTRACT_SYSTEM, JUDGE_SYSTEM, REFUSE_SYSTEM, SUPERSEDE_SYSTEM, answerUser, extractUser, judgeUser, refuseUser, supersedeUser } from "./prompts.ts";
 
 export interface Observation {
   id?: string;
@@ -94,39 +94,49 @@ function memoryLines(mf: MemoryFile): string {
   return out.join("\n");
 }
 
+/** 从模型输出里宽松提取 `- ` 事实行 */
+function parseFacts(raw: string): string[] {
+  return raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^[-*+]\s+/.test(l))
+    .map((l) => l.replace(/^[-*+]\s+/, "").replace(/[*_`]/g, "").trim())
+    .filter(Boolean);
+}
+
+/** 应用模型给出的 ADD / UPDATE 操作 */
+async function applyOps(mf: MemoryFile, raw: string): Promise<void> {
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    const u = /^UPDATE\b/i.test(t) ? t.replace(/^UPDATE\s*/i, "").split("|").map((x) => x.trim()) : null;
+    const a = !u && /^ADD\b/i.test(t) ? t.replace(/^ADD\s*/i, "").split("|").map((x) => x.trim()) : null;
+    if (u && u.length >= 3 && u[0] && u[1] && u[2]) await mf.updateNode(u[0], u[1], u.slice(2).join(" | "));
+    else if (a && a.length >= 2 && a[0] && a[1]) await mf.upsertNode(a[0], a.slice(1).join(" | "));
+  }
+}
+
 async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: IngestMode): Promise<void> {
   if (mode === "llm-update" && llm) {
     for (let i = 0; i < s.observations.length; i++) {
       const o = s.observations[i]!;
-      const raw = await llm.chat(UPDATE_SYSTEM, updateUser(memoryLines(mf), o.date, o.text), 8000);
-      for (const line of raw.split("\n")) {
-        const t = line.trim();
-        const u = /^UPDATE\b/i.test(t) ? t.replace(/^UPDATE\s*/i, "").split("|").map((x) => x.trim()) : null;
-        const a = !u && /^ADD\b/i.test(t) ? t.replace(/^ADD\s*/i, "").split("|").map((x) => x.trim()) : null;
-        if (u && u.length >= 3 && u[0] && u[1] && u[2]) await mf.updateNode(u[0], u[1], u.slice(2).join(" | "));
-        else if (a && a.length >= 2 && a[0] && a[1]) await mf.upsertNode(a[0], a.slice(1).join(" | "));
-      }
+      // 第一遍：纯抽取（不带记忆上下文，保证抽取完整性）
+      const facts = parseFacts(await llm.chat(EXTRACT_SYSTEM, extractUser(o.date, o.text), 8000));
+      if (facts.length === 0) continue;
+      // 第二遍：定向 supersede（当前记忆 + 新事实 → ADD/UPDATE）
+      await applyOps(mf, await llm.chat(SUPERSEDE_SYSTEM, supersedeUser(memoryLines(mf), facts), 8000));
+      // 回填：pass2 可能漏掉某些事实——确保每条抽出的事实都进了记忆（保召回）
+      const leafTokens = new Set(allLeaves(mf).flatMap((l) => contentTokens(l)));
+      for (const f of facts) if (!coveredBy(f, leafTokens)) await mf.upsertNode(`记忆/${o.id ?? `obs-${i + 1}`}`, f);
     }
     return;
   }
   if (mode === "llm" && llm) {
     for (let i = 0; i < s.observations.length; i++) {
       const o = s.observations[i]!;
-      const raw = await llm.chat(EXTRACT_SYSTEM, extractUser(o.date, o.text), 8000);
-      // 模型输出可能是 markdown 大纲；宽松提取 `- ` 事实行
-      const facts = raw
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => /^[-*+]\s+/.test(l))
-        .map((l) => l.replace(/^[-*+]\s+/, "").replace(/[*_`]/g, "").trim())
-        .filter(Boolean);
-      if (facts.length > 0) {
-        const path = `记忆/${o.id ?? `obs-${i + 1}`}`;
-        await mf.upsertNode(path, facts[0]!);
-        for (const f of facts.slice(1)) await mf.upsertNode(path, f);
-      } else if (o.text.trim()) {
-        await mf.upsertNode(`原文/${o.id ?? `obs-${i + 1}`}`, o.text.trim());
-      }
+      const facts = parseFacts(await llm.chat(EXTRACT_SYSTEM, extractUser(o.date, o.text), 8000));
+      const path = `记忆/${o.id ?? `obs-${i + 1}`}`;
+      if (facts.length > 0) for (const f of facts) await mf.upsertNode(path, f);
+      else if (o.text.trim()) await mf.upsertNode(`原文/${o.id ?? `obs-${i + 1}`}`, o.text.trim());
     }
     return;
   }
