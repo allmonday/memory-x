@@ -141,6 +141,20 @@ export function buildOutline(c: Conversation): string {
     .join("\n\n");
 }
 
+/** 原文分支：`## 原文` 父节点，其下 `### session-N`，每轮一条原话叶子 */
+export function buildRawBranchOutline(c: Conversation): string {
+  const parts: string[] = ["## 原文"];
+  for (const s of sessions(c)) parts.push("", `### session-${s.index}`, sessionRawOutline(s));
+  return parts.join("\n");
+}
+
+/** dia_id → 原话文本（供证据覆盖判定） */
+export function turnTextIndex(c: Conversation): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const s of sessions(c)) for (const t of s.turns) m.set(t.dia_id, `${t.speaker}: ${t.text}`);
+  return m;
+}
+
 /** 该题的 gold 物化路径集合（evidence dia_id → session-N） */
 export function goldSessions(q: QA): Set<string> {
   return new Set(q.evidence.map((e) => `session-${e.split(":")[0]!.replace(/^D/, "")}`));
