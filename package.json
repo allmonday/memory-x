@@ -8,6 +8,7 @@
   "scripts": {
     "test": "node --test packages/core/tests/*.test.ts",
     "crash-verify": "node scripts/crash-verify.ts",
-    "eval": "node scripts/eval.ts"
+    "eval": "node scripts/eval.ts",
+    "ui": "node scripts/ui.ts"
   }
 }

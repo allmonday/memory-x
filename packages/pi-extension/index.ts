@@ -37,6 +37,7 @@ let cache: MemoryFile | null = null;
 // ---------- 整理（做梦）模式状态 ----------
 let tidyMode = false;
 let tidyDraft: { outline: string; createdAt: string } | null = null;
+let uiPort: number | null = null;
 
 const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_move", "memory_delete", "memory_apply_outline"]);
 
@@ -335,10 +336,30 @@ export default function memoryExtension(pi: any): void {
   // ---------- 命令 ----------
 
   pi.registerCommand("memory", {
-    description: "Memory X：/memory 目录 | tidy 整理(做梦) | log 历史 | rollback <id> | stats | dump",
+    description: "Memory X：/memory 目录 | ui 只读浏览器视图 | tidy 整理 | lint 体检 | log 历史 | rollback <id> | stats | dump",
     handler: async (args: string, ctx: any) => {
       const m = await memory();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
+
+      if (tokens[0] === "ui") {
+        if (uiPort !== null) {
+          ctx.ui.notify(`UI 已在运行：http://127.0.0.1:${uiPort}`, "info");
+          return;
+        }
+        const port = Number(tokens[1]) || Number(process.env.MEMORY_X_UI_PORT) || 7320;
+        try {
+          const { startUiServer } = await import("../ui/server.ts");
+          const { url } = await startUiServer(() => memory(), { port }); // 复用实时实例
+          uiPort = port;
+          const { exec } = await import("node:child_process");
+          const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+          exec(`${cmd} ${url}`, () => {});
+          ctx.ui.notify(`只读 UI 已启动：${url}（编辑请经 pi 会话）`, "info");
+        } catch (e) {
+          ctx.ui.notify(`UI 启动失败：${(e as Error).message}`, "error");
+        }
+        return;
+      }
 
       if (tokens[0] === "lint") {
         const m = await memory();

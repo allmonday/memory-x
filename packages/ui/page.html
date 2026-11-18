@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory X</title>
+<style>
+  :root {
+    --bg: #fafaf9; --panel: #ffffff; --border: #e7e5e4; --text: #1c1917;
+    --dim: #78716c; --accent: #0369a1; --accent-bg: #f0f9ff;
+    --add: #15803d; --add-bg: #f0fdf4; --del: #b91c1c; --del-bg: #fef2f2;
+    --warn: #b45309; --info: #475569;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font: 14px/1.6 ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 20px;
+           background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .stats { color: var(--dim); font-size: 12px; }
+  header .rev { margin-left: auto; font-size: 12px; color: var(--dim); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #side { width: 320px; border-right: 1px solid var(--border); background: var(--panel);
+          display: flex; flex-direction: column; min-height: 0; }
+  #searchbar { padding: 10px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+  #searchbar input { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+  #tree { flex: 1; overflow: auto; padding: 8px; }
+  .node { user-select: none; }
+  .node .row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px;
+               cursor: pointer; white-space: nowrap; }
+  .node .row:hover { background: var(--accent-bg); }
+  .node .row.active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+  .node .caret { width: 12px; color: var(--dim); font-size: 10px; flex: none; }
+  .node .count { color: var(--dim); font-size: 11px; }
+  .node .diamond { color: var(--accent); font-size: 11px; }
+  #content { flex: 1; overflow: auto; padding: 20px 24px; min-width: 0; }
+  .view { display: none; } .view.on { display: block; }
+  .crumb { color: var(--dim); font-size: 12px; margin-bottom: 8px; word-break: break-all; }
+  .crumb b { color: var(--accent); }
+  h2.nd-title { font-size: 18px; margin-bottom: 12px; }
+  ul.leaves { list-style: none; margin: 0 0 16px; }
+  ul.leaves li { padding: 4px 0 4px 14px; border-left: 2px solid var(--border); margin-left: 2px; }
+  .content-block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+                   padding: 14px 16px; white-space: pre-wrap; font: 13px/1.7 ui-monospace, monospace; }
+  .section-title { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin: 18px 0 8px; }
+  .hit { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px;
+         background: var(--panel); cursor: pointer; }
+  .hit:hover { border-color: var(--accent); }
+  .hit .chain { font-size: 12px; color: var(--accent); margin-bottom: 4px; }
+  .hit .snip { font-size: 13px; color: var(--text); }
+  .hit .meta { font-size: 11px; color: var(--dim); margin-top: 4px; }
+  .rev-item { display: flex; gap: 10px; padding: 8px 12px; border: 1px solid var(--border);
+              border-radius: 8px; margin-bottom: 8px; background: var(--panel); cursor: pointer; align-items: baseline; }
+  .rev-item:hover { border-color: var(--accent); }
+  .rev-item .id { font-family: ui-monospace, monospace; color: var(--accent); flex: none; }
+  .rev-item .op { flex: none; font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--accent-bg); color: var(--accent); }
+  .rev-item .time { margin-left: auto; font-size: 11px; color: var(--dim); flex: none; }
+  pre.diff { font: 12px/1.6 ui-monospace, monospace; background: var(--panel); border: 1px solid var(--border);
+             border-radius: 8px; padding: 12px; overflow: auto; white-space: pre-wrap; }
+  pre.diff .a { color: var(--add); background: var(--add-bg); display: block; }
+  pre.diff .d { color: var(--del); background: var(--del-bg); display: block; }
+  .issue { padding: 8px 12px; border-left: 3px solid var(--info); background: var(--panel);
+           border-radius: 0 8px 8px 0; margin-bottom: 8px; }
+  .issue.warn { border-left-color: var(--warn); }
+  .issue .rule { font-size: 11px; color: var(--dim); }
+  .empty { color: var(--dim); padding: 20px; text-align: center; }
+  mark { background: #fde68a; padding: 0 2px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠 Memory X</h1>
+  <span class="stats" id="stats"></span>
+  <span class="rev" id="rev"></span>
+</header>
+<main>
+  <div id="side">
+    <div id="searchbar">
+      <input id="q" placeholder="搜索记忆…（回车）">
+    </div>
+    <div id="tree"></div>
+  </div>
+  <div id="content">
+    <div class="view on" id="v-node"></div>
+    <div class="view" id="v-search"></div>
+    <div class="view" id="v-history"></div>
+    <div class="view" id="v-lint"></div>
+  </div>
+</main>
+<script type="module">
+const $ = (s) => document.querySelector(s);
+let TREE = [];
+let lastRev = -1;
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error((await r.json()).error ?? r.status);
+  return r.json();
+}
+
+// ---------- 树 ----------
+const expanded = new Set();
+function renderTree() {
+  const el = $("#tree");
+  el.innerHTML = "";
+  const build = (nodes, depth) => {
+    for (const n of nodes) {
+      const wrap = document.createElement("div");
+      wrap.className = "node";
+      const row = document.createElement("div");
+      row.className = "node-row row";
+      row.style.paddingLeft = `${6 + depth * 14}px`;
+      const hasKids = n.children.length > 0;
+      const open = expanded.has(n.path);
+      row.innerHTML = `<span class="caret">${hasKids ? (open ? "▼" : "▶") : "·"}</span>
+        <span class="t">${esc(n.title)}</span>
+        ${n.leafTotal > 0 ? `<span class="count">${n.leafTotal}</span>` : ""}
+        ${n.hasContent ? `<span class="diamond">◆</span>` : ""}`;
+      row.onclick = () => {
+        if (hasKids) { open ? expanded.delete(n.path) : expanded.add(n.path); renderTree(); }
+        showNode(n);
+      };
+      wrap.appendChild(row);
+      if (hasKids && open) wrap.appendChild(build(n.children, depth + 1));
+      el.appendChild(wrap);
+    }
+    return el;
+  };
+  // 重新挂载方式构建子容器（简化：整体重绘）
+  const frag = document.createDocumentFragment();
+  const buildFrag = (nodes, depth, parent) => {
+    for (const n of nodes) {
+      const wrap = document.createElement("div");
+      wrap.className = "node";
+      const row = document.createElement("div");
+      row.className = "row";
+      row.style.paddingLeft = `${6 + depth * 14}px`;
+      const hasKids = n.children.length > 0;
+      const open = expanded.has(n.path);
+      const caret = document.createElement("span");
+      caret.className = "caret"; caret.textContent = hasKids ? (open ? "▼" : "▶") : "·";
+      const t = document.createElement("span"); t.className = "t"; t.textContent = n.title;
+      row.append(caret, t);
+      if (n.leafTotal > 0) { const c = document.createElement("span"); c.className = "count"; c.textContent = n.leafTotal; row.append(c); }
+      if (n.hasContent) { const d = document.createElement("span"); d.className = "diamond"; d.textContent = "◆"; row.append(d); }
+      row.onclick = () => {
+        if (hasKids) { expanded.has(n.path) ? expanded.delete(n.path) : expanded.add(n.path); renderTree(); }
+        showNode(n);
+        document.querySelectorAll(".row.active").forEach((x) => x.classList.remove("active"));
+        row.classList.add("active");
+      };
+      wrap.appendChild(row);
+      if (hasKids && open) buildFrag(n.children, depth + 1, wrap);
+      parent.appendChild(wrap);
+    }
+  };
+  buildFrag(TREE, 0, frag);
+  el.appendChild(frag);
+}
+
+function findByPath(path) {
+  let found = null;
+  const walk = (ns) => { for (const n of ns) { if (n.path === path) { found = n; return; } walk(n.children); } };
+  walk(TREE);
+  return found;
+}
+
+// ---------- 视图 ----------
+function switchView(id) {
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("on"));
+  $(id).classList.add("on");
+}
+
+function showNode(n) {
+  switchView("#v-node");
+  const segs = n.path.split("/");
+  const crumb = segs.map((s, i) => (i === segs.length - 1 ? `<b>${esc(s)}</b>` : esc(s))).join(" › ");
+  let html = `<div class="crumb">${crumb}</div><h2 class="nd-title">${esc(n.title)}</h2>`;
+  if (n.leaves.length > 0) {
+    html += `<div class="section-title">事实（${n.leaves.length}）</div><ul class="leaves">` +
+      n.leaves.map((l) => `<li>${esc(l)}</li>`).join("") + "</ul>";
+  }
+  if (n.content != null) {
+    html += `<div class="section-title">完整信息（content ◆）</div><div class="content-block">${esc(n.content)}</div>`;
+  }
+  if (n.children.length > 0) {
+    html += `<div class="section-title">子节点（${n.children.length}）</div><ul class="leaves">` +
+      n.children.map((c) => `<li data-path="${esc(c.path)}" style="cursor:pointer">${esc(c.title)} <span class="count">${c.leafTotal || ""}</span></li>`).join("") + "</ul>";
+  }
+  if (n.leaves.length === 0 && n.content == null && n.children.length === 0) {
+    html += `<div class="empty">（空节点）</div>`;
+  }
+  $("#v-node").innerHTML = html;
+  $("#v-node").querySelectorAll("li[data-path]").forEach((li) => {
+    li.onclick = () => { const t = findByPath(li.dataset.path); if (t) { expanded.add(parentPath(t.path)); renderTree(); showNode(t); } };
+  });
+}
+const parentPath = (p) => p.split("/").slice(0, -1).join("/");
+
+async function showSearch(q) {
+  switchView("#v-search");
+  $("#v-search").innerHTML = `<div class="empty">搜索中…</div>`;
+  const { hits } = await api(`/api/search?q=${encodeURIComponent(q)}`);
+  if (hits.length === 0) { $("#v-search").innerHTML = `<div class="empty">无命中：「${esc(q)}」</div>`; return; }
+  $("#v-search").innerHTML = hits.map((h, i) => `
+    <div class="hit" data-path="${esc(h.path)}">
+      <div class="chain">${[...h.ancestors, h.title].map(esc).join(" › ")}</div>
+      <div class="snip">${esc(h.snippet)}</div>
+      <div class="meta">score ${h.score} · ${h.via}${h.hasContent ? " · 有完整信息" : ""}${h.leafCount ? ` · ${h.leafCount} 条事实` : ""}</div>
+    </div>`).join("");
+  $("#v-search").querySelectorAll(".hit").forEach((el) => {
+    el.onclick = () => {
+      const p = el.dataset.path;
+      // 展开祖先
+      const segs = p.split("/");
+      for (let i = 1; i <= segs.length; i++) expanded.add(segs.slice(0, i).join("/"));
+      renderTree();
+      const n = findByPath(p);
+      if (n) showNode(n); else { // 重名消歧路径可能对不上树里的 title 展开，退化为搜索态
+        $("#v-search").innerHTML += "";
+      }
+    };
+  });
+}
+
+async function showHistory() {
+  switchView("#v-history");
+  const { revisions } = await api("/api/revisions?limit=100");
+  $("#v-history").innerHTML = revisions.map((r) => `
+    <div class="rev-item" data-id="${r.id}">
+      <span class="id">#${r.id}</span><span class="op">${esc(r.op)}</span>
+      <span>${esc(r.path ?? "")}</span><span class="time">${r.created_at}</span>
+    </div>`).join("") || `<div class="empty">暂无历史</div>`;
+  $("#v-history").querySelectorAll(".rev-item").forEach((el) => {
+    el.onclick = async () => {
+      const d = await api(`/api/revisions/diff?id=${el.dataset.id}`);
+      const box = document.createElement("pre");
+      box.className = "diff";
+      box.innerHTML = esc(d.diff).split("\n").map((line) => {
+        if (line.startsWith("+ ")) return `<span class="a">${line}</span>`;
+        if (line.startsWith("- ")) return `<span class="d">${line}</span>`;
+        return line;
+      }).join("\n");
+      const item = el;
+      document.querySelectorAll(".rev-item pre").forEach((x) => x.remove());
+      item.after(box);
+    };
+  });
+}
+
+async function showLint() {
+  switchView("#v-lint");
+  const { issues } = await api("/api/lint");
+  $("#v-lint").innerHTML = issues.length === 0
+    ? `<div class="empty">结构健康 ✓（深度/广度/叶子/重名/时间性命名均达标）</div>`
+    : issues.map((i) => `
+      <div class="issue ${i.level}">
+        <div><b>${esc(i.path || "(根)")}</b> <span class="rule">[${i.rule}]</span></div>
+        <div>${esc(i.message)}</div>
+      </div>`).join("");
+}
+
+// ---------- 顶栏动作 ----------
+$("#stats").textContent = "";
+$("#stats").style.cursor = "pointer";
+$("#stats").title = "点击查看体检";
+$("#stats").onclick = showLint;
+$("#rev").textContent = "";
+$("#rev").style.cursor = "pointer";
+$("#rev").title = "点击查看版本历史";
+$("#rev").onclick = showHistory;
+
+$("#q").onkeydown = (e) => { if (e.key === "Enter" && e.target.value.trim()) showSearch(e.target.value.trim()); };
+
+// ---------- 初始化 + 轮询 ----------
+async function refresh() {
+  const [treeD, stats, ping] = await Promise.all([api("/api/tree"), api("/api/stats"), api("/api/ping")]);
+  TREE = treeD.tree;
+  $("#stats").textContent = `${stats.nodes} 节点 · ${stats.leaves} 事实 · 深度 ${stats.depth}`;
+  $("#rev").textContent = `版本 #${ping.latest}（点击看历史）`;
+  renderTree();
+  if (!$("#v-node").innerHTML) showNode(TREE[0] ?? { title: "（空）", path: "", leaves: [], content: null, children: [] });
+}
+await refresh();
+setInterval(async () => {
+  try {
+    const ping = await api("/api/ping");
+    if (ping.latest !== lastRev && lastRev !== -1) refresh();
+    lastRev = ping.latest;
+  } catch {}
+}, 2000);
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
+</script>
+</body>
+</html>
