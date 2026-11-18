@@ -13,7 +13,8 @@
  */
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   MemoryFile,
   diffLines,
@@ -40,7 +41,6 @@ let tidyMode = false;
 let tidyDraft: { outline: string; createdAt: string } | null = null;
 /** 整理作用域：null=整棵树（全局），否则为目标节点路径（局部整理） */
 let tidyScope: string | null = null;
-let uiPort: number | null = null;
 
 const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_write_note", "memory_move", "memory_delete", "memory_apply_outline"]);
 
@@ -66,6 +66,72 @@ async function memory(): Promise<MemoryFile> {
 let cachedToc: string | null = null;
 function invalidateToc(): void {
   cachedToc = null;
+}
+
+/** 仓库根（pi-extension/index.ts 上两级） */
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** 探测某端口的只读 UI 是否在响应（任意 session/终端启动的独立进程） */
+async function uiAlive(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${url}/api/ping`, { signal: AbortSignal.timeout(800) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 轮询等待 UI 就绪（终端唤起后确认真的起来了） */
+async function waitUi(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await uiAlive(url)) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+/**
+ * 在独立终端里启动 standalone UI 进程，使其独立于本 pi session。
+ * 前台运行：关闭该终端 / Ctrl-C 即停（不做 daemon/pidfile）。
+ * 返回是否成功唤起终端；找不到可用终端时由调用方退化为提示手动执行。
+ */
+async function spawnUiInTerminal(argv: string[], cwd: string): Promise<boolean> {
+  const { spawn, spawnSync } = await import("node:child_process");
+  const has = (bin: string): boolean =>
+    spawnSync(process.platform === "win32" ? "where" : "which", [bin], { stdio: "ignore" }).status === 0;
+  const q = (s: string) => JSON.stringify(s);
+  const line = `cd ${q(cwd)} && ${argv.map(q).join(" ")}`;
+
+  const launch = (bin: string, args: string[]): boolean => {
+    const child = spawn(bin, args, { stdio: "ignore", detached: true });
+    child.on("error", () => {});
+    child.unref();
+    return true;
+  };
+
+  if (process.platform === "darwin") {
+    // Terminal.app 是 macOS 标配
+    return launch("osascript", [
+      "-e", `tell application "Terminal" to do script ${JSON.stringify(line)}`,
+      "-e", `tell application "Terminal" to activate`,
+    ]);
+  }
+  if (process.platform === "win32") {
+    return launch("cmd", ["/c", "start", "", "cmd", "/k", line]);
+  }
+  // Linux：探测常见终端模拟器
+  const candidates: Array<[string, string[]]> = [
+    ["x-terminal-emulator", ["-e", "bash", "-lc", line]],
+    ["gnome-terminal", ["--", "bash", "-lc", line]],
+    ["konsole", ["-e", "bash", "-lc", line]],
+    ["xfce4-terminal", ["--", "bash", "-lc", line]],
+    ["alacritty", ["-e", "bash", "-lc", line]],
+    ["kitty", ["bash", "-lc", line]],
+    ["xterm", ["-e", "bash", "-lc", line]],
+  ];
+  for (const [bin, args] of candidates) if (has(bin)) return launch(bin, args);
+  return false;
 }
 
 function text(t: string): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } {
@@ -380,27 +446,38 @@ export default function memoryExtension(pi: any): void {
   // ---------- 命令 ----------
 
   pi.registerCommand("memory", {
-    description: "Memory X：/memory 目录 | ui 只读浏览器视图 | tidy [节点路径] [-- 指导] 整理（无参弹树）| lint 体检 | log 历史 | rollback <id> | stats | dump",
+    description: "Memory X：/memory 目录 | ui 只读浏览器视图（独立终端启动） | tidy [节点路径] [-- 指导] 整理（无参弹树）| lint 体检 | log 历史 | rollback <id> | stats | dump",
     handler: async (args: string, ctx: any) => {
       const m = await memory();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
 
       if (tokens[0] === "ui") {
-        if (uiPort !== null) {
-          ctx.ui.notify(`UI 已在运行：http://127.0.0.1:${uiPort}`, "info");
+        const port = Number(tokens[1]) || Number(process.env.MEMORY_X_UI_PORT) || 7320;
+        const url = `http://127.0.0.1:${port}`;
+        const { exec } = await import("node:child_process");
+        const openCmd =
+          process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+
+        // 已在跑（可能是别的 session / 手动启动的独立进程）→ 直接打开
+        if (await uiAlive(url)) {
+          exec(`${openCmd} ${url}`, () => {});
+          ctx.ui.notify(`UI 已在运行：${url}`, "info");
           return;
         }
-        const port = Number(tokens[1]) || Number(process.env.MEMORY_X_UI_PORT) || 7320;
-        try {
-          const { startUiServer } = await import("../ui/server.ts");
-          const { url } = await startUiServer(() => memory(), { port }); // 复用实时实例
-          uiPort = port;
-          const { exec } = await import("node:child_process");
-          const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-          exec(`${cmd} ${url}`, () => {});
-          ctx.ui.notify(`只读 UI 已启动：${url}（编辑请经 pi 会话）`, "info");
-        } catch (e) {
-          ctx.ui.notify(`UI 启动失败：${(e as Error).message}`, "error");
+
+        // 未运行 → 在独立终端里拉起 standalone 进程（独立于本 session；Ctrl-C 关闭该终端即停）
+        const script = join(REPO_ROOT, "scripts", "ui.ts");
+        const manual = `node ${script} --dir "${MEMORY_DIR}" --port ${port}`;
+        const launched = await spawnUiInTerminal(
+          [process.execPath, script, "--dir", MEMORY_DIR, "--port", String(port)],
+          REPO_ROOT,
+        );
+        if (!launched) {
+          ctx.ui.notify(`没能自动唤起终端。请在另一个终端手动执行：\n  ${manual}`, "warn");
+        } else if (await waitUi(url, 5000)) {
+          ctx.ui.notify(`已在独立终端启动只读 UI：${url}（Ctrl-C 关闭该终端即停；编辑请经 pi 会话）`, "info");
+        } else {
+          ctx.ui.notify(`终端已唤起，但 UI 尚未就绪。若未出现，请在另一终端手动执行：\n  ${manual}`, "warn");
         }
         return;
       }

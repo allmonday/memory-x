@@ -85,11 +85,25 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 |---|---|---|
 | `MEMORY_X_DIR` | `~/memory-x/memory` | 记忆仓目录 |
 | `MEMORY_X_INJECT_MIN` | `1.0` | 自动召回注入分数闸门（噪音控制） |
+| `MEMORY_X_UI_PORT` | `7320` | 只读 Web UI 端口 |
+
+## 只读 Web UI
+
+UI 是**独立进程**，与 pi session 解耦（多个 session/终端共享同一实例，看到的是同一份记忆）：
+
+```bash
+npm run ui                      # 等价于 memory-x ui，只读浏览器视图
+npm link && memory-x ui         # 装成全局命令后，任意目录可用（别名 mx ui）
+# 选项：--dir <记忆目录> --port <端口> --host <地址> --no-open
+```
+
+前台运行，**Ctrl-C 退出**（无 daemon/pidfile）。端口已有 UI 在跑时自动复用。
+在 pi 内也可用 `/memory ui`：它会在**独立终端**里拉起该进程（不会占用 pi 终端，也不随 pi 退出而死）。
 
 ## 测试与评估
 
 ```bash
-npm test              # 76 项：文法/路径/操作/存储/版本回滚/检索/整理/迁移/锁/fuzz
+npm test              # 80 项：文法/路径/操作/存储/版本回滚/检索/整理/迁移/锁/fuzz/并发写
 npm run eval          # 检索质量评估（hit@1/@3/MRR；当前 0.73，题集本地保存不入库）
 npm run crash-verify  # 写入中 SIGKILL，验证 db 完好（WAL）
 ```
