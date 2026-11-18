@@ -8,7 +8,8 @@ import { parseMarkdown } from "./parser.ts";
 import { canonicalPathOf, resolvePath, forEachWithPath } from "./path.ts";
 import { effectiveSummary, summaryHash } from "./summary.ts";
 import { serializeSubtree } from "./serializer.ts";
-import { MemoryStore } from "./store.ts";
+import { MemoryStore, leafHash, type Episode, type EvidenceRef, type ChangeRow } from "./store.ts";
+import { diffTrees, diffToChangeRows, type TreeDiff } from "./tree-diff.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
 
 export const MEMORY_FILE = "MEMORY.md";
@@ -265,6 +266,56 @@ export class MemoryFile {
     });
   }
 
+  // ---------- 原始证据 / 采集（P4） ----------
+
+  /** 追加原始事件（会话/工具记录），返回 episode id。 */
+  captureEpisodes(
+    sessionId: string | null,
+    rows: Array<{ role: string; kind: string; text: string; toolName?: string | null; seq?: number }>,
+  ): number[] {
+    return this.store.appendEpisodes(rows.map((r) => ({ ...r, sessionId })));
+  }
+
+  listEpisodes(opts: { sessionId?: string; limit?: number; sinceId?: number } = {}): Episode[] {
+    return this.store.listEpisodes(opts);
+  }
+
+  getEpisodes(ids: number[]): Episode[] {
+    return this.store.getEpisodes(ids);
+  }
+
+  countEpisodes(): number {
+    return this.store.countEpisodes();
+  }
+
+  pruneEpisodes(keep: number): number {
+    return this.store.pruneEpisodes(keep);
+  }
+
+  /** 给某条叶子挂来源事件（弱链接，不修改叶子本身）。 */
+  linkEvidence(path: string, leaf: string, episodeIds: number[]): void {
+    this.store.linkEvidence(path, leafHash(leaf), episodeIds);
+  }
+
+  /** 查询来源事件：给 leaf 则按内容指纹精确匹配，否则返回该节点全部链接。 */
+  evidenceFor(path: string, leaf?: string): EvidenceRef[] {
+    return this.store.evidenceFor(path, leaf != null ? leafHash(leaf) : undefined);
+  }
+
+  // ---------- 变更审计（P3） ----------
+
+  listChanges(opts: { revisionId?: number; limit?: number } = {}): ChangeRow[] {
+    return this.store.listChanges(opts);
+  }
+
+  /** 相对某个历史版本的结构差异（当前树 vs 该版本快照）。 */
+  diffSince(revisionId: number): TreeDiff | null {
+    const base = this.store.getRevisionTree(revisionId);
+    if (!base) return null;
+    this.reloadIfStale();
+    return diffTrees(base, this.root);
+  }
+
   // ---------- 版本历史 / 回滚 ----------
 
   listRevisions(limit?: number) {
@@ -311,6 +362,12 @@ export class MemoryFile {
       }
       this.store.applyDelta(this.base, this.root); // 节点级增量写（不再整树 DELETE+INSERT）
       const rev = this.store.recordRevision(op, res.path, this.root); // change log（整树快照）
+      try {
+        // 结构化审计：记录本次相对基线的叶子/节点级变更
+        this.store.recordChanges(rev, diffToChangeRows(diffTrees(this.base, this.root)));
+      } catch {
+        // 审计失败不阻断写入
+      }
       this.store.rebuildFts(); // 派生索引
       this.base = structuredClone(this.root);
       this.loadedRevision = rev;

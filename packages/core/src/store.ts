@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryNode } from "./types.ts";
@@ -60,6 +61,35 @@ CREATE TABLE IF NOT EXISTS revisions(
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   tree TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS episodes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT,
+  seq INTEGER NOT NULL DEFAULT 0,
+  role TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  tool_name TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id, id);
+CREATE TABLE IF NOT EXISTS evidence(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_path TEXT NOT NULL,
+  leaf_hash TEXT NOT NULL,
+  episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_leaf ON evidence(node_path, leaf_hash);
+CREATE TABLE IF NOT EXISTS changes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  revision_id INTEGER,
+  op TEXT NOT NULL,
+  path TEXT,
+  from_text TEXT,
+  to_text TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_changes_rev ON changes(revision_id);
 `;
 
 /** 历史快照保留上限（超过后裁剪最旧版本；个人规模 ≈ 几 MB） */
@@ -101,6 +131,41 @@ function arrEq(a: string[], b: string[]): boolean {
  */
 export function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, "\\$&");
+}
+
+/** 叶子事实的内容指纹（sha1 前 16 位），用于 evidence 弱链接（不改叶子类型）。 */
+export function leafHash(leaf: string): string {
+  return createHash("sha1").update(leaf.trim()).digest("hex").slice(0, 16);
+}
+
+/** 原始事件（会话/工具记录，逐字保存）。 */
+export interface Episode {
+  id: number;
+  sessionId: string | null;
+  seq: number;
+  role: string;
+  kind: string;
+  text: string;
+  toolName: string | null;
+  createdAt: string;
+}
+
+/** 叶子 ↔ 原始事件的链接。 */
+export interface EvidenceRef {
+  nodePath: string;
+  leafHash: string;
+  episodeId: number;
+}
+
+/** 变更审计行（每次写入自动记录，供 /memory changes 与 log --diff）。 */
+export interface ChangeRow {
+  id: number;
+  revisionId: number | null;
+  op: string;
+  path: string | null;
+  fromText: string | null;
+  toText: string | null;
+  createdAt: string;
 }
 
 export interface SearchHit {
@@ -576,6 +641,196 @@ export class MemoryStore {
       | { tree: string }
       | undefined;
     return row ? (JSON.parse(row.tree) as MemoryNode) : null;
+  }
+
+  // ---------- 原始证据（episodes / evidence） ----------
+
+  appendEpisodes(
+    rows: Array<{ sessionId?: string | null; seq?: number; role: string; kind: string; text: string; toolName?: string | null }>,
+  ): number[] {
+    if (rows.length === 0) return [];
+    const stmt = this.db.prepare(
+      "INSERT INTO episodes(session_id, seq, role, kind, text, tool_name) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    const ids: number[] = [];
+    this.db.exec("BEGIN");
+    try {
+      for (const r of rows) {
+        const info = stmt.run(r.sessionId ?? null, r.seq ?? 0, r.role, r.kind, r.text, r.toolName ?? null);
+        ids.push(Number(info.lastInsertRowid));
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+    return ids;
+  }
+
+  listEpisodes(opts: { sessionId?: string; limit?: number; sinceId?: number } = {}): Episode[] {
+    const limit = opts.limit ?? 50;
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (opts.sessionId) {
+      clauses.push("session_id = ?");
+      params.push(opts.sessionId);
+    }
+    if (opts.sinceId != null) {
+      clauses.push("id > ?");
+      params.push(opts.sinceId);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT id, session_id, seq, role, kind, text, tool_name, created_at FROM episodes ${where} ORDER BY id DESC LIMIT ?`,
+      )
+      .all(...params, limit) as Array<{
+      id: number;
+      session_id: string | null;
+      seq: number;
+      role: string;
+      kind: string;
+      text: string;
+      tool_name: string | null;
+      created_at: string;
+    }>;
+    return rows.reverse().map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      seq: r.seq,
+      role: r.role,
+      kind: r.kind,
+      text: r.text,
+      toolName: r.tool_name,
+      createdAt: r.created_at,
+    }));
+  }
+
+  countEpisodes(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM episodes").get() as { n: number };
+    return row.n;
+  }
+
+  /** 保留最新 keep 条，返回删除条数（关联 evidence 随外键级联删除）。 */
+  pruneEpisodes(keep: number): number {
+    const before = this.countEpisodes();
+    const k = Math.max(0, Math.floor(keep));
+    if (before <= k) return 0;
+    this.db.exec(
+      `DELETE FROM episodes WHERE id NOT IN (SELECT id FROM episodes ORDER BY id DESC LIMIT ${k})`,
+    );
+    return before - this.countEpisodes();
+  }
+
+  linkEvidence(nodePath: string, leafHashValue: string, episodeIds: number[]): void {
+    if (episodeIds.length === 0) return;
+    const stmt = this.db.prepare("INSERT INTO evidence(node_path, leaf_hash, episode_id) VALUES (?, ?, ?)");
+    this.db.exec("BEGIN");
+    try {
+      for (const id of episodeIds) stmt.run(nodePath, leafHashValue, id);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  evidenceFor(nodePath: string, leafHashValue?: string): EvidenceRef[] {
+    const rows = (
+      leafHashValue
+        ? this.db
+            .prepare(
+              "SELECT node_path, leaf_hash, episode_id FROM evidence WHERE node_path = ? AND leaf_hash = ? ORDER BY episode_id",
+            )
+            .all(nodePath, leafHashValue)
+        : this.db
+            .prepare("SELECT node_path, leaf_hash, episode_id FROM evidence WHERE node_path = ? ORDER BY episode_id")
+            .all(nodePath)
+    ) as Array<{ node_path: string; leaf_hash: string; episode_id: number }>;
+    return rows.map((r) => ({ nodePath: r.node_path, leafHash: r.leaf_hash, episodeId: r.episode_id }));
+  }
+
+  // ---------- 变更审计（changes） ----------
+
+  recordChanges(
+    revisionId: number | null,
+    rows: Array<{ op: string; path?: string | null; from?: string | null; to?: string | null }>,
+  ): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.prepare(
+      "INSERT INTO changes(revision_id, op, path, from_text, to_text) VALUES (?, ?, ?, ?, ?)",
+    );
+    this.db.exec("BEGIN");
+    try {
+      for (const r of rows) stmt.run(revisionId, r.op, r.path ?? null, r.from ?? null, r.to ?? null);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  listChanges(opts: { revisionId?: number; limit?: number } = {}): ChangeRow[] {
+    const rows = (
+      opts.revisionId != null
+        ? this.db
+            .prepare(
+              "SELECT id, revision_id, op, path, from_text, to_text, created_at FROM changes WHERE revision_id = ? ORDER BY id",
+            )
+            .all(opts.revisionId)
+        : this.db
+            .prepare(
+              "SELECT id, revision_id, op, path, from_text, to_text, created_at FROM changes ORDER BY id DESC LIMIT ?",
+            )
+            .all(opts.limit ?? 50)
+    ) as Array<{
+      id: number;
+      revision_id: number | null;
+      op: string;
+      path: string | null;
+      from_text: string | null;
+      to_text: string | null;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      revisionId: r.revision_id,
+      op: r.op,
+      path: r.path,
+      fromText: r.from_text,
+      toText: r.to_text,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /** 按 id 批量取 episode（保持入参顺序去重后的升序）。 */
+  getEpisodes(ids: number[]): Episode[] {
+    const uniq = [...new Set(ids)].filter((n) => Number.isInteger(n));
+    if (uniq.length === 0) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT id, session_id, seq, role, kind, text, tool_name, created_at FROM episodes WHERE id IN (${uniq.map(() => "?").join(",")}) ORDER BY id`,
+      )
+      .all(...uniq) as Array<{
+      id: number;
+      session_id: string | null;
+      seq: number;
+      role: string;
+      kind: string;
+      text: string;
+      tool_name: string | null;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      seq: r.seq,
+      role: r.role,
+      kind: r.kind,
+      text: r.text,
+      toolName: r.tool_name,
+      createdAt: r.created_at,
+    }));
   }
 
   close(): void {

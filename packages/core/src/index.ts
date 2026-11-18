@@ -5,9 +5,10 @@ export { tocDigest, dumpTree, type TocOptions, type DumpOptions } from "./digest
 export { deriveSummary, effectiveSummary, summaryHash, SUMMARY_MAX_CHARS, type SummaryOptions } from "./summary.ts";
 export { parseFragment, applyOutline } from "./fragment.ts";
 export { withDirLock } from "./lock.ts";
+export { diffTrees, diffToChangeRows, flattenTree, type TreeDiff, type LeafRef, type NodeRef } from "./tree-diff.ts";
 export { diffLines, diffStats, formatDiff, type DiffLine } from "./diff.ts";
 export { lintTree, suggestPath, type LintIssue, type LintOptions } from "./lint.ts";
-export { MemoryStore, STORE_DIR, DB_FILE, MAX_REVISIONS, escapeLike, type SearchHit } from "./store.ts";
+export { MemoryStore, STORE_DIR, DB_FILE, MAX_REVISIONS, escapeLike, leafHash, type SearchHit, type Episode, type EvidenceRef, type ChangeRow } from "./store.ts";
 export { parsePath, resolvePath, splitDisambig, levenshtein, enumerateNodePaths, canonicalPathOf } from "./path.ts";
 export { upsertNode, moveNode, deleteNode } from "./ops.ts";
 export type { MemoryNode, OpResult, Resolved } from "./types.ts";

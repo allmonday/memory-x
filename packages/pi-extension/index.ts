@@ -43,13 +43,51 @@ const WRITE_STYLE = "短句、一句一事、主动语态、术语一致、去�
 
 let cache: MemoryFile | null = null;
 
+// ---------- 采集（P4）状态 ----------
+let lastUserPrompt: string | null = null;
+const CAPTURE_ON = process.env.MEMORY_X_CAPTURE !== "off";
+const EPISODE_MAX = Number(process.env.MEMORY_X_EPISODE_MAX ?? "2000");
+const EPISODE_TEXT_MAX = 4000;
+
+function safeJson(v: unknown): string {
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+/** 从消息里尽力抽取纯文本（不同 message 形状兜底）。 */
+function extractMessageText(msg: any): string {
+  if (msg == null) return "";
+  const c = msg.content ?? msg.text;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    return c
+      .map((p: any) => {
+        if (typeof p === "string") return p;
+        if (p?.text) return p.text;
+        if (p?.type === "tool_use") return `[tool_use ${p.name ?? ""}] ${safeJson(p.input)}`;
+        if (p?.type === "tool_result") return extractMessageText({ content: p.content });
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function clampEpisodeText(s: string): string {
+  return s.length > EPISODE_TEXT_MAX ? `${s.slice(0, EPISODE_TEXT_MAX)}…（截断）` : s;
+}
+
 // ---------- 整理（做梦）模式状态 ----------
 let tidyMode = false;
 let tidyDraft: { outline: string; createdAt: string } | null = null;
 /** 整理作用域：null=整棵树（全局），否则为目标节点路径（局部整理） */
 let tidyScope: string | null = null;
 
-const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_update", "memory_write_note", "memory_summary", "memory_move", "memory_delete", "memory_apply_outline"]);
+const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_update", "memory_write_note", "memory_summary", "memory_link_evidence", "memory_move", "memory_delete", "memory_apply_outline"]);
 
 /** 整理模式下拦截写工具：方案只能走 memory_propose 草稿，确认后才落盘 */
 function gateTidyWrites(pi: any): void {
@@ -316,6 +354,60 @@ export default function memoryExtension(pi: any): void {
   });
 
   pi.registerTool({
+    name: "memory_evidence",
+    label: "查记忆来源",
+    description:
+      "查询某条记忆的原始来源事件（episodes）。给 path 返回该节点已挂来源；再给 leaf（叶子原文）则只查该叶子的来源。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: pathParam,
+        leaf: { type: "string", description: "可选：叶子原文，精确查该条来源" },
+      },
+      required: ["path"],
+    },
+    async execute(_toolCallId: string, params: { path: string; leaf?: string }) {
+      const m = await memory();
+      const refs = m.evidenceFor(params.path, params.leaf);
+      if (refs.length === 0) return text(`「${params.path}」暂无可追溯来源（未链接 episode）。`);
+      const ids = [...new Set(refs.map((r) => r.episodeId))];
+      const eps = m.getEpisodes(ids);
+      const byId = new Map(eps.map((e) => [e.id, e]));
+      const lines = ids.map((id) => {
+        const e = byId.get(id);
+        return e ? `#${e.id} [${e.role}/${e.kind}] ${e.text.slice(0, 300)}` : `#${id}（事件已裁剪）`;
+      });
+      return text(`来源事件（${ids.length} 条）：\n${lines.join("\n")}`);
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_link_evidence",
+    label: "挂记忆来源",
+    description:
+      "把某条叶子记忆链接到原始来源事件（episode id），使结论可追溯（如「从第 N 条对话/输出得出」）。leaf 须在该节点内存在。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: pathParam,
+        leaf: { type: "string", description: "叶子原文（须在该节点内存在）" },
+        episode_ids: { type: "array", items: { type: "number" }, description: "来源事件 id 列表" },
+      },
+      required: ["path", "leaf", "episode_ids"],
+    },
+    async execute(_toolCallId: string, params: { path: string; leaf: string; episode_ids: number[] }) {
+      const m = await memory();
+      const sec = m.readSection(params.path);
+      if (!sec) return text(`路径不存在：${params.path}`);
+      if (!sec.node.leaves.includes(params.leaf)) {
+        return text(`该节点内不存在这条叶子，未链接：${params.leaf}`);
+      }
+      m.linkEvidence(params.path, params.leaf, params.episode_ids);
+      return text(`已把「${params.leaf}」链接到 ${params.episode_ids.length} 条来源事件（${params.episode_ids.join(", ")}）`);
+    },
+  });
+
+  pi.registerTool({
     name: "memory_move",
     label: "移动记忆",
     description: "把子树移动到目标节点之下",
@@ -486,6 +578,10 @@ export default function memoryExtension(pi: any): void {
     // 跨 session 写入后：重载内存树 → 目录缓存失效（下一行重新生成）
     const m = await memory();
     if (m.reloadIfStale()) invalidateToc();
+    // 采集：记住本轮用户 prompt，turn_end 时与助手/工具结果一起落 episodes
+    if (CAPTURE_ON && event.messageType === "user" && typeof event.prompt === "string") {
+      lastUserPrompt = event.prompt;
+    }
     // 稳定段（目录+规则）：内容不变 → pi 差分为空 → 不重发不破缓存
     if (cachedToc === null) {
       cachedToc = tocDigest(m.root, { maxChars: SECTION_MAX_CHARS });
@@ -522,10 +618,44 @@ export default function memoryExtension(pi: any): void {
     }
   });
 
+  // ---------- 采集：每轮把用户/助手/工具结果落 episodes（P4 原始证据） ----------
+  pi.on("turn_end", async (event: any, ctx: any) => {
+    if (!CAPTURE_ON) return undefined;
+    try {
+      const m = await memory();
+      const seq = typeof event.turnIndex === "number" ? event.turnIndex : 0;
+      const entries: Array<{ role: string; kind: string; text: string; toolName?: string | null; seq?: number }> = [];
+      if (lastUserPrompt) {
+        entries.push({ role: "user", kind: "user", text: clampEpisodeText(lastUserPrompt), seq });
+        lastUserPrompt = null;
+      }
+      const atext = extractMessageText(event.message);
+      if (atext) entries.push({ role: "assistant", kind: "assistant", text: clampEpisodeText(atext), seq });
+      for (const r of event.toolResults ?? []) {
+        const text = clampEpisodeText(
+          extractMessageText(r?.content != null ? { content: r.content } : r) || safeJson(r),
+        );
+        if (text) entries.push({ role: "tool", kind: "tool_result", toolName: r?.toolName ?? r?.name ?? null, text, seq });
+      }
+      if (entries.length === 0) return undefined;
+      let sessionId: string | null = null;
+      try {
+        sessionId = ctx?.sessionManager?.getSessionId?.() ?? null;
+      } catch {
+        sessionId = null;
+      }
+      m.captureEpisodes(sessionId, entries);
+      if (m.countEpisodes() > EPISODE_MAX) m.pruneEpisodes(EPISODE_MAX);
+    } catch {
+      // 采集失败不阻断会话
+    }
+    return undefined;
+  });
+
   // ---------- 命令 ----------
 
   pi.registerCommand("memory", {
-    description: "Memory X：/memory 目录 | ui 只读浏览器视图（独立终端启动） | tidy [节点路径] [-- 指导] 整理（无参弹树）| lint 体检 | log 历史 | rollback <id> | stats | dump",
+    description: "Memory X：/memory 目录 | ui 只读浏览器视图 | tidy 整理（做梦）| lint 体检 | log 历史 | rollback <id> | commit 抽取 | changes 审计 | episodes 事件 | stats | dump",
     handler: async (args: string, ctx: any) => {
       const m = await memory();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -558,6 +688,74 @@ export default function memoryExtension(pi: any): void {
         } else {
           ctx.ui.notify(`终端已唤起，但 UI 尚未就绪。若未出现，请在另一终端手动执行：\n  ${manual}`, "warn");
         }
+        return;
+      }
+
+      if (tokens[0] === "commit") {
+        const sub = tokens[1];
+        if (sub === "show" || sub === "log") {
+          const changes = m.listChanges({ limit: Number(tokens[2]) || 30 });
+          if (changes.length === 0) {
+            ctx.ui.notify("暂无变更审计记录", "info");
+            return;
+          }
+          const lines = changes.map(
+            (c) => `#${c.revisionId ?? "-"} ${c.op} ${c.path ?? ""}${c.toText ? ` → ${c.toText.slice(0, 50)}` : c.fromText ? ` ← ${c.fromText.slice(0, 50)}` : ""}`,
+          );
+          ctx.ui.notify(`最近变更（${changes.length}）：\n${lines.join("\n")}`, "info");
+          return;
+        }
+        const recent = m.listEpisodes({ limit: 60 });
+        if (recent.length === 0) {
+          ctx.ui.notify("暂无可抽取的原始记录（本会话还没有对话）", "info");
+          return;
+        }
+        const body = recent
+          .map((e) => `#${e.id} [${e.role}/${e.kind}]${e.toolName ? `(${e.toolName})` : ""} ${e.text.slice(0, 400)}`)
+          .join("\n");
+        pi.sendMessage(
+          {
+            customType: "memory-commit",
+            content: [
+              "[提交任务] 从下面的原始会话记录中抽取值得长期记忆的内容，写入记忆树。",
+              "规则：只抽取跨会话有价值的结论/决策/实体关系/待办/偏好；不臆造；一条一事；短句、主动语态、保留日期与专有名词（日期用今天）。",
+              "新增用 memory_upsert；替换过时条目用 memory_update(path, match, leaf)。若某条结论明显来自某几条记录，用 memory_link_evidence(path, leaf, [episode ids]) 挂来源（推荐）。",
+              "完成后用一句话说明写了什么（新增/替换了哪些）。",
+              "",
+              "原始记录（#id 为 episode id，可直接用作来源）：",
+              body,
+            ].join("\n"),
+            display: true,
+          },
+          { triggerTurn: true },
+        );
+        ctx.ui.notify(`已发起抽取任务（${recent.length} 条原始记录）；完成后用 /memory changes 查看审计，或 /memory commit show`, "info");
+        return;
+      }
+
+      if (tokens[0] === "changes") {
+        const n = Number(tokens[1]) || 30;
+        const changes = m.listChanges({ limit: n });
+        if (changes.length === 0) {
+          ctx.ui.notify("暂无变更审计记录", "info");
+          return;
+        }
+        const lines = changes.map(
+          (c) => `#${c.revisionId ?? "-"} ${c.op} ${c.path ?? ""}${c.toText ? ` → ${c.toText.slice(0, 50)}` : c.fromText ? ` ← ${c.fromText.slice(0, 50)}` : ""}`,
+        );
+        ctx.ui.notify(`最近变更（${changes.length}）：\n${lines.join("\n")}`, "info");
+        return;
+      }
+
+      if (tokens[0] === "episodes") {
+        const n = Number(tokens[1]) || 20;
+        const eps = m.listEpisodes({ limit: n });
+        if (eps.length === 0) {
+          ctx.ui.notify("暂无原始事件", "info");
+          return;
+        }
+        const lines = eps.map((e) => `#${e.id} [${e.role}/${e.kind}] ${e.text.slice(0, 80)}`);
+        ctx.ui.notify(`最近事件（共 ${m.countEpisodes()} 条）：\n${lines.join("\n")}`, "info");
         return;
       }
 
