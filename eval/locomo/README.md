@@ -31,7 +31,7 @@ npm run eval:locomo -- --sample 200 --answer           # 端到端（默认含�
 node scripts/locomo.ts --sample 200 --answer --raw-ingest   # 端到端（不要结构化分支）
 ```
 
-参数：`--data` `--conv` `--limit N` `--sample N` `--seed N` `--topK N` `--cover-min F` `--answer` `--llm-ingest` `--raw-ingest` `--ingest-max-tokens N` `--model`。
+参数：`--data` `--conv` `--limit N` `--sample N` `--seed N` `--topK N` `--cover-min F` `--answer` `--llm-ingest` `--raw-ingest` `--fusion none|raw-first|raw-only|interleave` `--ingest-max-tokens N` `--model`。
 
 运行时 TTY 下原地刷新进度 `[i/N] xx.x% ●/◐/○`（答题模式 ✓/✗）；非 TTY 每 25 题一行。结尾打印覆盖率、J-score 与 LLM token 用量。
 
@@ -49,16 +49,17 @@ node scripts/locomo.ts --sample 200 --answer --raw-ingest   # 端到端（不要
 
 ## 已知发现（conv-26，199 题，口径 B）
 
-| 建树 | cover@1 | cover@3 | cover@5 | MRR |
+| 建树 / 检索策略 | cover@1 | cover@3 | cover@5 | MRR |
 |---|---|---|---|---|
-| **仅原文分支** | **0.618** | 0.849 | **0.945** | **0.748** |
-| 原文 + 结构化分支 | 0.261 | 0.643 | 0.749 | 0.457 |
+| 仅原文分支（无结构化） | 0.618 | 0.849 | **0.945** | 0.748 |
+| 双分支 · 混在一个池（`fusion=none`） | 0.261 | 0.643 | 0.749 | 0.457 |
+| 双分支 · `raw-first` 融合（默认） | 0.638 | 0.854 | 0.925 | 0.751 |
+| 双分支 · `raw-only` | 0.638 | **0.859** | 0.935 | **0.757** |
+| 双分支 · `interleave` / 配额注入（r4+s1 等） | ≤0.638 | ~0.85 | ≤0.905 | ≤0.750 |
 
-**加入 LLM 结构化分支反而大幅拉低证据召回。** 因为结构化节点又短又关键词密集，bm25 长度归一化把它们顶到前列，把真正含证据原句的 `原文/session-N` 挤出 top-5。
-
-> 早期（per-session 混合结构 + 路径口径）另有数据：机械 .678 / 纯结构化 .538 / 混合 .648（hit@1）。两套口径不可直接比较。
-
-结论：**在纯词法检索 + 单索引下，LLM 结构化分支会与原文竞争并伤害召回。** 要让结构化发挥价值，需要：按分支分别检索再融合、给原文更高权重，或上语义/向量检索（M5）。
+两点结论：
+1. **不融合（一个池）会灾难性掉分**（cover@1 0.618→0.261）：结构化节点短且关键词密集，bm25 长度归一化把它们顶到原文前面，把含证据原句的 `原文/session-N` 挤出 top-5。
+2. **分检融合能完全修复**（`raw-first` 拉回 0.638）。但**结构化对“证据覆盖”零增量**——任何让它进 top-5 的配额都会降低 cover@5。证据检索靠原文；结构化的价值只能在 **答案质量（J-score）** 或 **语义检索（M5）** 上体现。
 
 ## 提醒
 
