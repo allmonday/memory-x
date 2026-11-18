@@ -73,6 +73,22 @@ interface NodeRow {
   content: string | null;
 }
 
+/** 扁平化后的节点元数据（applyDelta 的 diff 单位） */
+interface FlatNode {
+  title: string;
+  leaves: string[];
+  content: string | null;
+  parentPath: string | null;
+  ord: number;
+  depth: number;
+}
+
+function arrEq(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export interface SearchHit {
   path: string;
   title: string;
@@ -201,6 +217,90 @@ export class MemoryStore {
       this.db.exec("ROLLBACK");
       throw e;
     }
+  }
+
+  // ---------- 增量写（节点级，替代整树重写） ----------
+
+  /**
+   * 把 base → next 的差异以节点级 SQL 写回（单事务）。
+   * 以物化 path 为稳定键：新增/更新按 path upsert，删除按 path 级联。
+   * 未被本进程改动的节点不出现在 diff 中，因此不会被覆盖（多写者安全）。
+   */
+  applyDelta(base: MemoryNode, next: MemoryNode): void {
+    const b = this.flatten(base);
+    const n = this.flatten(next);
+
+    const removed = [...b.keys()].filter((p) => !n.has(p));
+    const upserts: Array<[string, FlatNode]> = [...n.entries()].filter(([p, v]) => {
+      const o = b.get(p);
+      return (
+        !o ||
+        o.title !== v.title ||
+        o.content !== v.content ||
+        o.parentPath !== v.parentPath ||
+        o.ord !== v.ord ||
+        !arrEq(o.leaves, v.leaves)
+      );
+    });
+    // 根行总是 upsert：空库首次写入时 base 里的根从未落库
+    if (n.has("") && !upserts.some(([p]) => p === "")) upserts.push(["", n.get("")!]);
+
+    const delNode = this.db.prepare("DELETE FROM nodes WHERE path = ?");
+    const upsertRow = this.db.prepare(
+      `INSERT INTO nodes(parent_id, ord, title, path, depth, content)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(path) DO UPDATE SET
+         parent_id = excluded.parent_id, ord = excluded.ord, title = excluded.title,
+         depth = excluded.depth, content = excluded.content, updated_at = datetime('now')`,
+    );
+    const idOf = this.db.prepare("SELECT id FROM nodes WHERE path = ?");
+    const delLeaves = this.db.prepare("DELETE FROM leaves WHERE node_id = ?");
+    const insLeaf = this.db.prepare("INSERT INTO leaves(node_id, ord, text) VALUES (?, ?, ?)");
+
+    this.db.exec("BEGIN");
+    try {
+      // 删除：深→浅（父级联会带走子树，后续删除自然是幂等 no-op）
+      for (const p of removed.sort((x, y) => y.split("/").length - x.split("/").length)) delNode.run(p);
+      // 新增/更新：浅→深（保证父先于子落库）
+      for (const [p, v] of upserts.sort((x, y) => x[1].depth - y[1].depth)) {
+        const parentId =
+          v.parentPath === null
+            ? null
+            : ((idOf.get(v.parentPath) as { id: number } | undefined)?.id ?? null);
+        upsertRow.run(parentId, v.ord, v.title, p, v.depth, v.content);
+        const nodeId = (idOf.get(p) as { id: number }).id;
+        delLeaves.run(nodeId);
+        for (let i = 0; i < v.leaves.length; i++) insLeaf.run(nodeId, i, v.leaves[i]!);
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** 扁平化整树：物化 path → 节点元数据（与 saveTree 同一套 [n] 消歧规则）。 */
+  private flatten(root: MemoryNode): Map<string, FlatNode> {
+    const out = new Map<string, FlatNode>();
+    const walk = (node: MemoryNode, path: string, parentPath: string | null, ord: number, depth: number) => {
+      out.set(path, {
+        title: node.title,
+        leaves: node.leaves,
+        content: node.content ?? null,
+        parentPath,
+        ord,
+        depth,
+      });
+      const counts = new Map<string, number>();
+      node.children.forEach((c, i) => {
+        const seen = (counts.get(c.title) ?? 0) + 1;
+        counts.set(c.title, seen);
+        const seg = seen > 1 ? `${c.title}[${seen}]` : c.title;
+        walk(c, path === "" ? seg : `${path}/${seg}`, path, i, depth + 1);
+      });
+    };
+    walk(root, "", null, 0, 0);
+    return out;
   }
 
   /** 供检索层：按 path 前缀查节点（含完整链路）。 */

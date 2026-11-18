@@ -54,6 +54,8 @@ export async function startUiServer(mfFactory: () => Promise<MemoryFile>, opts: 
     const url = new URL(req.url ?? "/", `http://${host}`);
     try {
       const mf = await mfFactory();
+      // 复用实例（pi 内嵌 /memory ui）时，另一个 session 可能已写入：应答前按 DB 版本号重载
+      mf.reloadIfStale();
 
       if (url.pathname === "/" || url.pathname === "/index.html") {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });

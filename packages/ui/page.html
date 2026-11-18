@@ -78,6 +78,7 @@
   .rev-item { display: flex; gap: 10px; padding: 8px 12px; border: 1px solid var(--border);
               border-radius: 8px; margin-bottom: 8px; background: var(--panel); cursor: pointer; align-items: baseline; }
   .rev-item:hover { border-color: var(--accent); }
+  .rev-item.open { border-color: var(--accent); }
   .rev-item .id { font-family: ui-monospace, monospace; color: var(--accent); flex: none; }
   .rev-item .op { flex: none; font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--accent-bg); color: var(--accent); }
   .rev-item .time { margin-left: auto; font-size: 11px; color: var(--dim); flex: none; }
@@ -424,6 +425,12 @@ async function showHistory() {
     </div>`).join("") || `<div class="empty">暂无历史</div>`;
   $("#v-history").querySelectorAll(".rev-item").forEach((el) => {
     el.onclick = async () => {
+      const wasOpen = el.classList.contains("open");
+      // 先收起当前已展开的 diff（diff 是 .rev-item 的兄弟节点，用 pre.diff 选择）
+      $("#v-history").querySelectorAll("pre.diff").forEach((x) => x.remove());
+      $("#v-history").querySelectorAll(".rev-item.open").forEach((x) => x.classList.remove("open"));
+      if (wasOpen) return; // 再次点击同一项 → 收起
+      el.classList.add("open");
       const d = await api(`/api/revisions/diff?id=${el.dataset.id}`);
       const box = document.createElement("pre");
       box.className = "diff";
@@ -432,9 +439,7 @@ async function showHistory() {
         if (line.startsWith("- ")) return `<span class="d">${line}</span>`;
         return line;
       }).join("\n");
-      const item = el;
-      document.querySelectorAll(".rev-item pre").forEach((x) => x.remove());
-      item.after(box);
+      el.after(box);
     };
   });
 }

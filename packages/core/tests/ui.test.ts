@@ -61,3 +61,23 @@ test("UI server：跨进程写入后新鲜度（factory 每次重开）", async 
   server.close();
   server.closeAllConnections();
 });
+
+test("UI server：复用同一实例（pi 内嵌 /memory ui）也能看到别的 session 的写入", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mx-ui-embed-"));
+  const shared = await MemoryFile.open(dir); // 模拟扩展里常驻的缓存实例
+  await shared.upsertNode("工作/pi调研", "RPC 与 SDK 共享 core 层");
+  const { server, url } = await startUiServer(() => Promise.resolve(shared), { port: 0 });
+
+  // 另一个 session（独立实例）写入
+  const other = await MemoryFile.open(dir);
+  await other.upsertNode("新域", "新事实");
+
+  // /api/tree 应重载后返回最新树，而非复用实例里的陈旧 root
+  const tree = (await (await fetch(`${url}/api/tree`)).json()).tree;
+  assert.ok(tree.some((n: any) => n.title === "新域"));
+  // 复用实例本身也被刷新（避免后续整树覆盖）
+  assert.ok(shared.root.children.some((c) => c.title === "新域"));
+
+  server.close();
+  server.closeAllConnections();
+});

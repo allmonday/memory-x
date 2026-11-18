@@ -28,6 +28,10 @@ export class MemoryFile {
   readonly dir: string;
   root: MemoryNode;
   private readonly store: MemoryStore;
+  /** 内存树对应的 DB 版本号；用于检测其它进程/session 的写入 */
+  private loadedRevision = 0;
+  /** 最近一次与 DB 对齐的树基线；persist 时用它算增量 diff */
+  private base: MemoryNode = { title: "Memory", leaves: [], children: [] };
 
   private constructor(dir: string, root: MemoryNode, store: MemoryStore) {
     this.dir = dir;
@@ -61,7 +65,30 @@ export class MemoryFile {
         store.recordRevision("baseline", null, root);
       }
     }
-    return new MemoryFile(dir, root, store);
+    const mf = new MemoryFile(dir, root, store);
+    mf.loadedRevision = store.listRevisions(1)[0]?.id ?? 0;
+    mf.base = structuredClone(root);
+    return mf;
+  }
+
+  /** 同步从 DB 重载内存树与基线（含版本号）。 */
+  private syncFromStore(): void {
+    this.root = this.store.loadTree();
+    this.base = structuredClone(this.root);
+    this.loadedRevision = this.store.listRevisions(1)[0]?.id ?? 0;
+  }
+
+  /**
+   * 若磁盘上已有更新的版本（别的进程/session 写入），重新载入内存树。
+   * 返回是否发生重载。读入口与 UI 服务端在应答前调用，避免读到陈旧缓存。
+   */
+  reloadIfStale(): boolean {
+    const latest = this.store.listRevisions(1)[0]?.id ?? 0;
+    if (latest === this.loadedRevision) return false;
+    this.root = this.store.loadTree();
+    this.base = structuredClone(this.root);
+    this.loadedRevision = latest;
+    return true;
   }
 
   get dbPath(): string {
@@ -69,6 +96,7 @@ export class MemoryFile {
   }
 
   readSection(path: string): Resolved | null {
+    this.reloadIfStale();
     return resolvePath(this.root, path, { fuzzy: true });
   }
 
@@ -79,6 +107,7 @@ export class MemoryFile {
   }
 
   tocDigest(opts?: TocOptions): string {
+    this.reloadIfStale();
     return tocDigest(this.root, opts);
   }
 
@@ -101,39 +130,41 @@ export class MemoryFile {
 
   /** 写节点完整信息（RAG 语料，Markdown）。可含围栏代码块（序列化用动态围栏，不冲突）。 */
   async writeNote(path: string, content: string): Promise<OpResult> {
-    const r = this.readSection(path);
-    if (!r) return { ok: false, path, revision: null, changed: false };
-    if (r.node.content === content) {
-      return { ok: true, path, revision: null, changed: false };
-    }
-    r.node.content = content;
-    return this.persist("note", path);
+    return this.mutate("note", path, (root) => {
+      const r = resolvePath(root, path, { fuzzy: true });
+      if (!r) return { ok: false, changed: false, path };
+      if (r.node.content === content) return { changed: false, path };
+      r.node.content = content;
+      return { changed: true, path };
+    });
   }
 
   async upsertNode(path: string, leaf: string): Promise<OpResult> {
-    const r = upsertNode(this.root, path, leaf);
-    if (!r.changed) return { ok: true, path: r.resolvedPath, revision: null, changed: false };
-    return this.persist("upsert", r.resolvedPath);
+    return this.mutate("upsert", path, (root) => {
+      const r = upsertNode(root, path, leaf);
+      return { changed: r.changed, path: r.resolvedPath };
+    });
   }
 
   async applyOutline(path: string, outline: string): Promise<OpResult> {
-    const r = applyOutline(this.root, path, outline);
-    if (!r.changed) return { ok: true, path: r.resolvedPath, revision: null, changed: false };
-    return this.persist("apply_outline", r.resolvedPath);
+    return this.mutate("apply_outline", path, (root) => {
+      const r = applyOutline(root, path, outline);
+      return { changed: r.changed, path: r.resolvedPath };
+    });
   }
 
   async moveNode(from: string, to: string): Promise<OpResult> {
-    if (!moveNode(this.root, from, to)) {
-      return { ok: false, path: from, revision: null, changed: false };
-    }
-    return this.persist("move", `${from} -> ${to}`);
+    return this.mutate("move", `${from} -> ${to}`, (root) => {
+      const ok = moveNode(root, from, to);
+      return { ok, changed: ok, path: from };
+    });
   }
 
   async deleteNode(path: string): Promise<OpResult> {
-    if (!deleteNode(this.root, path)) {
-      return { ok: false, path, revision: null, changed: false };
-    }
-    return this.persist("delete", path);
+    return this.mutate("delete", path, (root) => {
+      const ok = deleteNode(root, path);
+      return { ok, changed: ok, path };
+    });
   }
 
   /** 整树替换（整理/做梦）：outline 为完整新树（相对 H2 起），根不挂叶子。 */
@@ -147,18 +178,20 @@ export class MemoryFile {
     if (count(frag.children) > 3000) {
       throw new Error("整树方案过大（>3000 条目）");
     }
-    // content（fenced RAG 语料）不在 outline 中表达：按物化路径把旧树 content 迁回同路径节点。
-    // 改名/合并/移动导致路径变化的节点，content 无法自动映射（会丢失）；同路径节点完整保留。
-    const savedContent = new Map<string, string>();
-    forEachWithPath(this.root.children, "", (node, path) => {
-      if (node.content != null) savedContent.set(path, node.content);
+    return this.mutate("tidy", "(整树)", (root) => {
+      // content（fenced RAG 语料）不在 outline 中表达：按物化路径把旧树 content 迁回同路径节点。
+      // 改名/合并/移动导致路径变化的节点，content 无法自动映射（会丢失）；同路径节点完整保留。
+      const savedContent = new Map<string, string>();
+      forEachWithPath(root.children, "", (node, path) => {
+        if (node.content != null) savedContent.set(path, node.content);
+      });
+      forEachWithPath(frag.children, "", (node, path) => {
+        const keep = savedContent.get(path);
+        if (keep != null) node.content = keep;
+      });
+      root.children = frag.children;
+      return { changed: true, path: "(整树)" };
     });
-    forEachWithPath(frag.children, "", (node, path) => {
-      const keep = savedContent.get(path);
-      if (keep != null) node.content = keep;
-    });
-    this.root.children = frag.children;
-    return this.persist("tidy", "(整树)");
   }
 
   // ---------- 版本历史 / 回滚 ----------
@@ -171,20 +204,44 @@ export class MemoryFile {
   async restoreRevision(id: number): Promise<OpResult> {
     const tree = this.store.getRevisionTree(id);
     if (!tree) return { ok: false, path: `#${id}`, revision: null, changed: false };
-    if (JSON.stringify(tree) === JSON.stringify(this.root)) {
-      return { ok: true, path: `#${id}`, revision: null, changed: false };
-    }
-    this.root = tree;
-    return this.persist("restore", `#${id}`);
+    return this.mutate("restore", `#${id}`, (root) => {
+      if (JSON.stringify(tree) === JSON.stringify(root)) return { changed: false, path: `#${id}` };
+      root.title = tree.title;
+      root.leaves = tree.leaves;
+      root.content = tree.content;
+      root.children = tree.children;
+      return { changed: true, path: `#${id}` };
+    });
   }
 
-  private async persist(op: string, path: string): Promise<OpResult> {
-    const revision = await withDirLock(this.dir, async () => {
-      this.store.saveTree(this.root); // 真相：整树单事务
-      const rev = this.store.recordRevision(op, path, this.root); // change log
+  /**
+   * 变更包装：在目录锁内先按 DB 版本重载（拿到别的进程的最新写入），再应用改动，
+   * 然后只把差异（节点级）写回 DB + 记版本 + 重建索引。
+   * —— 消除「改内存旧树 → 整树覆盖」造成的跨会话丢失。
+   */
+  private async mutate(
+    op: string,
+    path: string,
+    apply: (root: MemoryNode) => { changed: boolean; path: string; ok?: boolean },
+  ): Promise<OpResult> {
+    return withDirLock(this.dir, async () => {
+      this.reloadIfStale(); // 关键：应用前先对齐 DB（含他人写入）
+      let res: { changed: boolean; path: string; ok?: boolean };
+      try {
+        res = apply(this.root);
+      } catch (e) {
+        this.syncFromStore(); // 失败则丢弃可能的部分改动
+        throw e;
+      }
+      if (!res.changed) {
+        return { ok: res.ok ?? true, path: res.path, revision: null, changed: false };
+      }
+      this.store.applyDelta(this.base, this.root); // 节点级增量写（不再整树 DELETE+INSERT）
+      const rev = this.store.recordRevision(op, res.path, this.root); // change log（整树快照）
       this.store.rebuildFts(); // 派生索引
-      return rev;
+      this.base = structuredClone(this.root);
+      this.loadedRevision = rev;
+      return { ok: true, path: res.path, revision: String(rev), changed: true };
     });
-    return { ok: true, path, revision: String(revision), changed: true };
   }
 }

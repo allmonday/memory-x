@@ -36,3 +36,22 @@ test("MemoryFile 拒绝解析损坏的既有文件", async () => {
   await writeFile(join(dir, "MEMORY.md"), "这不是合法文档\n", "utf8");
   await assert.rejects(() => MemoryFile.open(dir), /第 1 行/);
 });
+
+test("并发写者：多实例交替写互不覆盖（节点级增量 + 写前重载）", async () => {
+  const dir = await tmpDir();
+  const a = await MemoryFile.open(dir);
+  const b = await MemoryFile.open(dir); // 与 a 同时存在、且早于 a 的第一次写
+
+  await a.upsertNode("A", "a1");
+  await b.upsertNode("B", "b1"); // b 打开时还没有 A；若整树覆盖会把 A 冲掉
+  await a.upsertNode("C", "c1");
+
+  const fresh = await MemoryFile.open(dir);
+  assert.deepEqual(
+    fresh.root.children.map((c) => c.title).sort(),
+    ["A", "B", "C"],
+    "三方写入都应保留",
+  );
+  // 写前重载：b 内存里也应当看得到 a 写的 A
+  assert.ok(b.root.children.some((c) => c.title === "A"));
+});

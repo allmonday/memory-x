@@ -339,9 +339,11 @@ export default function memoryExtension(pi: any): void {
   // ---------- system prompt 注入（P2：只给目录，不给内容） ----------
 
   pi.on("before_agent_start", async (event: any) => {
+    // 跨 session 写入后：重载内存树 → 目录缓存失效（下一行重新生成）
+    const m = await memory();
+    if (m.reloadIfStale()) invalidateToc();
     // 稳定段（目录+规则）：内容不变 → pi 差分为空 → 不重发不破缓存
     if (cachedToc === null) {
-      const m = await memory();
       cachedToc = tocDigest(m.root, { maxChars: SECTION_MAX_CHARS });
     }
     event.systemPromptOptions.sections.memory = [
