@@ -33,30 +33,45 @@
 
 ## 1. 架构总览
 
+> 本节于 2026-11-18 按 B 案实现重绘。v0.1 草案原为「`MEMORY.md` + `notes/` + git」文件式存储，已被 D6→D7 推翻；
+> §2–§3、§9 仍是草案期规格（文件文法 / git 快照 / `MemoryFile` API / `memory/` 为 git 仓库），以 README 与实现为准。
+
+```mermaid
+flowchart TB
+    subgraph SESSION["日常 pi 会话（CLI / 任意 SDK 宿主）"]
+        subgraph EXT["pi 扩展 · @memory-x/pi-extension（进程内）"]
+            direction LR
+            TOOLS["tools<br/>read · search · upsert · write_note · move<br/>apply_outline · delete · stats · propose"]
+            HOOKS["hooks（已实现）<br/>before_agent_start → 目录摘要 + 本轮自动召回注入<br/>tool_call → 整理模式下拦截写工具<br/><br/>计划中（M2）<br/>turn_end → 抽取候选队列<br/>agent_before_settle / agent_settled → codemode 判断 + 写树<br/>session_before_compact → 归档压缩内容"]
+            PROMPT["system prompt section<br/>目录 + 使用策略（渐进披露）"]
+        end
+        subgraph CORE["核心库 · @memory-x/core（纯 TS · 零运行时依赖）"]
+            direction LR
+            CORE_PARSE["parser · serializer · path · ops<br/>文法解析（往返稳定）<br/>路径寻址 + [n] 消歧 · upsert / move / delete"]
+            CORE_STORE["store · lock · memory-file<br/>SQLite 原子写（WAL + O_EXCL 文件锁）<br/>revisions 快照与回滚"]
+            CORE_DERIVE["digest · fragment · lint · diff<br/>目录摘要 / applyOutline 子树重构<br/>巡检 / LCS 行级 diff"]
+        end
+    end
+
+    subgraph STORE["存储 · B 案单文件真相源（D6→D7）"]
+        direction LR
+        DB[".memory/memory.db<br/>nodes / leaves<br/>物化 path 链路 + content 正文"]
+        REV["revisions<br/>整树快照 change log · MAX 500<br/>回滚 = 落新版本（历史不改写 · 可前滚）"]
+        IDX["派生索引<br/>FTS5 trigram ∪ LIKE →（后期）向量 → RRF 融合<br/>可随时删库重建"]
+    end
+
+    EXT -->|"工具调用（进程内直调 · 无服务 / 端口 / 协议）"| CORE
+    CORE -->|"原子写"| DB
+    CORE -->|"每次写落快照"| REV
+    IDX -. "派生 / 重建" .-> DB
 ```
-┌─ 日常 pi 会话（CLI / 任意 SDK 宿主）────────────────┐
-│                                                      │
-│  pi 扩展（@memory-x/pi-extension，进程内）           │
-│   ├─ tools: memory_read / memory_search /            │
-│   │         memory_upsert / memory_apply_outline /   │
-│   │         memory_move                              │
-│   ├─ hooks:  turn_end ──► 抽取候选队列               │
-│   │          agent_settled ──► codemode 判断+写树    │
-│   │          session_before_compact ──► 归档压缩内容 │
-│   │          context_with_system ──► 目录摘要注入    │
-│   └─ system prompt section: 目录 + 使用策略           │
-│                                                      │
-│  memory-core（@memory-x/core，纯 TS 库）             │
-│   ├─ MemoryFile：解析/树操作/原子写/路径寻址          │
-│   ├─ GitSnapshot：每次 save 自动 commit              │
-│   └─ Index（派生缓存）：FTS5 → (后期)向量 → 融合     │
-└──────────────┬───────────────────────────────────────┘
-               │ 文件系统
-   memory/ （真相源，git 仓库）
-    ├─ MEMORY.md        # 大纲树（骨架：标题 + 短条目）
-    ├─ notes/*.md       # 长正文（按路径派生，主文件做索引）
-    └─ .memory/         # index.db 等派生缓存（gitignore）
-```
+
+要点：
+
+- **唯一真相源**：SQLite 单文件（`nodes` + `revisions`）；无镜像、无 git、无 `notes/` 派生文件；索引与目录摘要都是可删重建的缓存（P1）。
+- **进程内扩展**：无 HTTP / GraphQL / MCP，宿主只有 CLI / SDK 两种形态（非目标）。
+- **渐进披露**：常驻注入只有目录摘要（`<memory>` 双 section 之一），细节靠工具按需取；本轮相关记忆另走 `<memory_recall>` 自动召回（P2）。
+- **抽取宁缺毋滥**：自动抽取（M2，见 §4.2–4.3）只入队"跨会话仍有价值"的结构信息（P4）。
 
 ---
 

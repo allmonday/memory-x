@@ -6,28 +6,45 @@
 
 ## 架构
 
+四层结构，向下依赖、逐层收敛到唯一真相源：
+
+```mermaid
+flowchart TB
+    subgraph EXT["pi 扩展 · @memory-x/pi-extension"]
+        direction LR
+        TOOLS["工具面<br/>read · search · upsert · write_note<br/>move · apply_outline · delete · stats · propose"]
+        INJ["注入（双 section · 差分对齐）<br/>memory 目录 + 规则（稳定，变更才补发）<br/>memory_recall 本轮相关记忆（话题切换才换）"]
+    end
+
+    subgraph RET["检索 · 派生索引（可随时重建）"]
+        direction LR
+        FTS["FTS5 trigram（≥3 字 · CJK 滑窗拆词）<br/>∪ LIKE（双字词兜底）"] --> RANK["停用词过滤 · bm25 排序<br/>访问频次 / 新鲜度信号加成"]
+        RANK --> HIT["命中返回<br/>完整链路 + 祖先 / 兄弟 + 片段（渐进披露）"]
+    end
+
+    subgraph CORE["核心库 · @memory-x/core"]
+        direction LR
+        TREE["树语义<br/>路径寻址 · [n] 消歧<br/>编辑距离容错 · 幂等 upsert"]
+        RESTRUCT["applyOutline 子树重构<br/>applyTree 整树替换（整理）<br/>LCS 行级 diff（整理方案审阅）"]
+    end
+
+    subgraph STORE["存储 · B 案单文件真相源"]
+        direction LR
+        DB["真相源 .memory/memory.db<br/>nodes / leaves（物化 path 链路 + content 正文）<br/>WAL 事务 + O_EXCL 文件锁"]
+        REV["版本历史 revisions<br/>整树快照 change log · 保留 500 版<br/>回滚 = 落新版本（历史不改写 · 可前滚）"]
+    end
+
+    EXT -->|"search 检索"| RET
+    EXT -->|"其余工具读写"| CORE
+    RET -->|"查索引 / 回读链路"| CORE
+    CORE -->|"原子写"| STORE
+    REV -. "回滚" .-> DB
+    STORE -. "派生 / 重建索引" .-> RET
 ```
-┌─ pi 扩展（@memory-x/pi-extension）───────────────────────┐
-│  工具面：read / search / upsert / write_note / move /      │
-│          apply_outline / delete / stats / propose         │
-│  注入（双 section，差分对齐）：                             │
-│    <memory>        目录+规则（稳定，变更才补发）             │
-│    <memory_recall> 本轮相关记忆（话题切换才换，自动召回）      │
-├─ 检索（派生索引，可随时重建）──────────────────────────────┤
-│  FTS5 trigram（≥3字，CJK 滑窗拆词）∪ LIKE（双字词兜底）      │
-│  停用词过滤 · bm25 排序 · 访问频次/新鲜度信号加成             │
-│  命中返回：完整链路 + 祖先/兄弟 + 片段（渐进披露）            │
-├─ 核心库（@memory-x/core）────────────────────────────────┤
-│  树语义：路径寻址 / [n] 消歧 / 编辑距离容错 / 幂等 upsert     │
-│  applyOutline 子树重构 · applyTree 整树替换（整理）          │
-│  LCS 行级 diff（整理方案审阅用）                             │
-├─ 存储（B 案，单文件真相源）───────────────────────────────┤
-│  真相源  .memory/memory.db（WAL 事务 + O_EXCL 文件锁）      │
-│          nodes/leaves（物化 path 链路 + content 正文）      │
-│  版本历史 revisions（整树快照 change log，保留 500 版）      │
-│          回滚 = 落新版本（历史不改写，可前滚）                │
-└──────────────────────────────────────────────────────────┘
-```
+
+- **读路径**：`search` → 派生索引（FTS5 ∪ LIKE，bm25 + 信号加成）→ 回读树拿到完整链路与片段 → 注入 `memory_recall`。
+- **写路径**：`upsert` / `write_note` / `apply_outline` → core 树语义与幂等校验 → 原子落盘（WAL + 文件锁）→ 派生索引增量更新，旧树另存为 revisions 快照。
+- **可回滚**：任何写都落新版本、不改写历史，`/memory rollback <id>` 只是再落一版，因此可前滚。
 
 ## 快速开始
 
