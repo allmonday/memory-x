@@ -2,24 +2,31 @@
 
 > 一棵给 pi 的长期记忆树 —— [pi coding agent](https://github.com/earendil-works/pi) 的扩展，把日常对话中的结构性信息沉淀进一棵可演进的记忆树。
 
-**你掌舵，它记图** —— 你在终端和 pi 正常工作；值得长期记住的结论、决策、实体关系，被写进一棵 Markdown 可读、SQLite 为真相、git 管版本的记忆树。下次对话，目录常驻注入，细节按需下钻。
+**你掌舵，它记图** —— 你在终端和 pi 正常工作；值得长期记住的结论、决策、实体关系，被写进一棵 SQLite 为真相、可检索、可回滚、可"做梦"整理的记忆树。下次对话，目录常驻注入，相关记忆自动召回。
 
 ## 架构
 
 ```
-┌─ pi 扩展（@memory-x/pi-extension）────────────┐
-│  memory_read / upsert / move / apply_outline  │
-│  <memory> 目录段常驻注入（渐进披露）            │
-│  /memory · /memory stats · /memory dump       │
-├─ 核心库（@memory-x/core）─────────────────────┤
-│  树语义：路径寻址 / [n] 消歧 / 编辑距离容错      │
-│  幂等 upsert / 防环 move / applyOutline 重构    │
-├─ 存储（B 案）────────────────────────────────┤
-│  真相源  .memory/memory.db（物化 path 链路      │
-│          + content 字段，为 RAG 预留）          │
-│  镜像   MEMORY.md（可完整重建 db，git 管 diff）  │
-│  安全   WAL 事务 + 原子写 + O_EXCL 文件锁        │
-└──────────────────────────────────────────────┘
+┌─ pi 扩展（@memory-x/pi-extension）───────────────────────┐
+│  工具面：read / search / upsert / move /                  │
+│          apply_outline / delete / stats / propose         │
+│  注入（双 section，差分对齐）：                             │
+│    <memory>        目录+规则（稳定，变更才补发）             │
+│    <memory_recall> 本轮相关记忆（话题切换才换，自动召回）      │
+├─ 检索（派生索引，可随时重建）──────────────────────────────┤
+│  FTS5 trigram（≥3字，CJK 滑窗拆词）∪ LIKE（双字词兜底）      │
+│  停用词过滤 · bm25 排序 · 访问频次/新鲜度信号加成             │
+│  命中返回：完整链路 + 祖先/兄弟 + 片段（渐进披露）            │
+├─ 核心库（@memory-x/core）────────────────────────────────┤
+│  树语义：路径寻址 / [n] 消歧 / 编辑距离容错 / 幂等 upsert     │
+│  applyOutline 子树重构 · applyTree 整树替换（整理）          │
+│  LCS 行级 diff（整理方案审阅用）                             │
+├─ 存储（B 案，单文件真相源）───────────────────────────────┤
+│  真相源  .memory/memory.db（WAL 事务 + O_EXCL 文件锁）      │
+│          nodes/leaves（物化 path 链路 + content 正文）      │
+│  版本历史 revisions（整树快照 change log，保留 500 版）      │
+│          回滚 = 落新版本（历史不改写，可前滚）                │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## 快速开始
@@ -39,15 +46,19 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 
 ## 使用
 
-对话中模型自主读写；你也可以：
+对话中模型自主读写检索；你的命令面：
 
 ```
-/memory                 # 看记忆目录
-/memory stats           # 规模统计
-/memory log             # 版本历史（change log）
-/memory rollback <id>  # 回滚到指定版本（历史保留，可再回滚回来）
-/memory dump --full     # 整树导出到文件
+/memory                    # 看记忆目录
+/memory tidy               # 整理（做梦）：模型出方案草稿 → show 看 diff → apply 确认落盘
+/memory tidy show|apply|discard
+/memory log                # 版本历史（change log）
+/memory rollback <id>      # 回滚到指定版本（历史保留，可再滚回来）
+/memory stats              # 规模统计
+/memory dump [--full] [文件]  # 整树导出
 ```
+
+**整理（做梦）的安全设计**：方案只进草稿不落盘；整理模式下所有写工具被 `tool_call` 拦截器封禁；落盘前人审 diff（+N/-N 行）；apply 后仍可 rollback。
 
 文法（严格模式，非法行直接报错）：
 
@@ -66,24 +77,33 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 ```
 ```
 
-## 测试
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MEMORY_X_DIR` | `~/memory-x/memory` | 记忆仓目录 |
+| `MEMORY_X_INJECT_MIN` | `1.0` | 自动召回注入分数闸门（噪音控制） |
+
+## 测试与评估
 
 ```bash
-npm test        # 56 项：文法/路径/操作/存储/版本回滚/检索/迁移/锁/fuzz
-npm run eval     # 检索质量评估（hit@1/@3/MRR，题集本地保存）
-npm run crash-verify   # 写入中 SIGKILL，验证文件完好
+npm test              # 63 项：文法/路径/操作/存储/版本回滚/检索/整理/迁移/锁/fuzz
+npm run eval          # 检索质量评估（hit@1/@3/MRR；当前 0.73，题集本地保存不入库）
+npm run crash-verify  # 写入中 SIGKILL，验证 db 完好（WAL）
 ```
 
 零运行时依赖（Node ≥ 22.19，`node:sqlite` + strip-types 直跑 TS）。
 
 ## 路线图
 
-- [x] M0 核心库（解析/寻址/原子写/git）
-- [x] M1 pi 扩展最小闭环（5 工具 + TOC 注入）
-- [x] B 案存储（SQLite 真相 + 物化链路）
+- [x] M0 核心库（解析/寻址/原子性/锁）
+- [x] M1 pi 扩展最小闭环（工具 + TOC 注入）
+- [x] B 案存储（SQLite 真相 + 物化链路 + content 正文）
 - [x] 版本历史与回滚（revisions change log，移植自 MindMap X MVCC 语义）
-- [x] M3 检索（FTS + 自动召回 + 评估 0.73）
-- [ ] M2 自动抽取（turn_end → codemodel 判断 → 入图）
+- [x] M3 检索（FTS+LIKE 双通道、停用词、访问/新鲜度信号、自动召回闸门、评估设施）
+- [x] 整理（做梦）：手动触发，草稿-人审-落盘三段式
+- [ ] M2 自动抽取（turn_end → codemodel 判断 → 入图；自动做梦节奏）
+- [ ] M5 语义向量层（bge-small-zh + RRF 融合，评估达标才保留）
 
 详见 [PLAN.md](./PLAN.md)。
 
