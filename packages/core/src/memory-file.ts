@@ -119,13 +119,10 @@ export class MemoryFile {
     return this.readSection(path)?.node.content ?? null;
   }
 
-  /** 写节点完整信息（RAG 语料）。content 不得含围栏行（markdown 导出不变式）。 */
+  /** 写节点完整信息（RAG 语料，Markdown）。可含围栏代码块（序列化用动态围栏，不冲突）。 */
   async writeNote(path: string, content: string): Promise<OpResult> {
     const r = this.readSection(path);
     if (!r) return { ok: false, path, revision: null, changed: false };
-    if (/^\s*```\s*$/m.test(content)) {
-      throw new Error(`节点 "${path}" 的 content 含围栏行，无法存储`);
-    }
     if (r.node.content === content) {
       return { ok: true, path, revision: null, changed: false };
     }

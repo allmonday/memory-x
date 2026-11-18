@@ -15,7 +15,7 @@ export class ParseError extends Error {
 
 const HEADING_RE = /^(#{1,6}) (.+)$/;
 const BULLET_RE = /^- (.+)$/;
-const FENCE = "```";
+const FENCE_RE = /^(`{3,})\s*$/;
 /** 标题禁用字符：'/'（路径分隔）、'['（消歧语法） */
 const TITLE_FORBIDDEN = /[/[]/;
 
@@ -37,12 +37,13 @@ export function parseMarkdown(md: string): MemoryNode {
 
   const lines = md.split("\n");
   let inFence = false;
+  let fenceMark = "";
   const contentLines: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trimEnd();
 
     if (inFence) {
-      if (line === FENCE) {
+      if (line === fenceMark) {
         stack[stack.length - 1]!.content = contentLines.join("\n");
         inFence = false;
       } else {
@@ -52,11 +53,13 @@ export function parseMarkdown(md: string): MemoryNode {
     }
     if (line === "") continue;
 
-    if (line === FENCE) {
+    const fm = FENCE_RE.exec(line);
+    if (fm) {
       if (!sawRoot || stack.length < 2) {
         throw new ParseError("content 块必须位于结构节点标题之下", i + 1);
       }
       inFence = true;
+      fenceMark = fm[1]!;
       contentLines.length = 0;
       continue;
     }

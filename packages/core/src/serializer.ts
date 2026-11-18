@@ -43,11 +43,16 @@ function writeBlock(out: string[], node: MemoryNode, depth: number) {
   out.push(`${"#".repeat(depth + 1)} ${node.title}`);
   for (const leaf of node.leaves) out.push(`- ${leaf}`);
   if (node.content != null) {
-    if (node.content.includes("\n```\n") || node.content.startsWith("```") || node.content.endsWith("```")) {
-      throw new Error(`节点 "${node.title}" 的 content 含围栏行，无法序列化`);
-    }
-    out.push("", "```", node.content, "```");
+    const fence = contentFence(node.content);
+    out.push("", fence, node.content, fence);
   }
   out.push("");
   for (const child of node.children) writeBlock(out, child, depth + 1);
+}
+
+/** 为 content 选一个不与其中反引号冲突的围栏：比最长连续反引号串长 1，且至少 3。 */
+function contentFence(content: string): string {
+  let longest = 0;
+  for (const m of content.matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
+  return "`".repeat(Math.max(3, longest + 1));
 }

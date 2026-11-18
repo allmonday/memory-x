@@ -8,7 +8,7 @@
 
 ```
 ┌─ pi 扩展（@memory-x/pi-extension）───────────────────────┐
-│  工具面：read / search / upsert / move /                  │
+│  工具面：read / search / upsert / write_note / move /      │
 │          apply_outline / delete / stats / propose         │
 │  注入（双 section，差分对齐）：                             │
 │    <memory>        目录+规则（稳定，变更才补发）             │
@@ -74,7 +74,7 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 - 验证崩溃窗口
 
 ### 调研正文
-```（fenced block = 节点完整信息，RAG 语料）
+```（fenced block = 节点完整信息（Markdown 正文），RAG 语料；UI 按 Markdown 渲染）
 ```
 ```
 

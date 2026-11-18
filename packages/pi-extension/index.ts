@@ -42,7 +42,7 @@ let tidyDraft: { outline: string; createdAt: string } | null = null;
 let tidyScope: string | null = null;
 let uiPort: number | null = null;
 
-const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_move", "memory_delete", "memory_apply_outline"]);
+const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_write_note", "memory_move", "memory_delete", "memory_apply_outline"]);
 
 /** 整理模式下拦截写工具：方案只能走 memory_propose 草稿，确认后才落盘 */
 function gateTidyWrites(pi: any): void {
@@ -138,6 +138,38 @@ export default function memoryExtension(pi: any): void {
         r.changed
           ? `已写入 ${r.path}（版本 #${r.revision}，可用 /memory rollback 回滚）${hints.length ? "\n⚠️ " + hints.join("；") : ""}`
           : `已存在，无需写入：${r.path}`,
+      );
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_write_note",
+    label: "写节点完整信息",
+    description:
+      "写入/更新节点的「完整信息」（content，RAG 语料）。当某节点信息量超出一条叶子（长正文、结构化说明、清单、对比、步骤、代码）时用它。请用 Markdown 组织（标题/列表/表格/引用/行内代码/围栏代码），UI 会按 Markdown 渲染；不要把长正文塞进叶子。",
+    promptSnippet: "写入节点完整信息（Markdown 正文）",
+    promptGuidelines: [
+      "Use memory_write_note for a node's long-form body (the ◆ 完整信息), not memory_upsert — leaves are one-line facts only.",
+      "Write that body as Markdown (headings, lists, tables, quotes, code fences); the UI renders it. Keep it self-contained and factual.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        path: pathParam,
+        content: { type: "string", description: "节点的完整信息（Markdown 文本，可含围栏代码块）" },
+      },
+      required: ["path", "content"],
+    },
+    async execute(_toolCallId: string, params: { path: string; content: string }) {
+      const m = await memory();
+      const r = await m.writeNote(params.path, params.content);
+      if (r.changed) invalidateToc();
+      return text(
+        r.ok
+          ? r.changed
+            ? `已写入 ${r.path} 的完整信息（版本 #${r.revision}，可用 /memory rollback 回滚）`
+            : `内容无变化：${params.path}`
+          : `路径不存在：${params.path}（先用 memory_read 确认路径）`,
       );
     },
   });
@@ -315,7 +347,7 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；重构用 memory_apply_outline；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；长正文（超一条叶子）用 memory_write_note 写成 Markdown；重构用 memory_apply_outline；勿猜路径。",
     ].join("\n");
 
     // 召回段（独立 section）：每轮随 prompt 变化，但只重发这小块，不动大段。

@@ -80,12 +80,14 @@ test('写操作后：db 更新 + 版本记录 + 幂等无新版本', async () =>
 });
 
 
-test("content 含 ``` 行时拒绝写入", async () => {
+test("content 可含 ``` 围栏（动态围栏序列化，round-trip 稳定）", async () => {
   const dir = await tmpDir();
   const mf = await MemoryFile.open(dir);
   await mf.upsertNode("域", "x");
-  await assert.rejects(
-    () => mf.writeNote("域", "line1\n```\nline2"),
-    /含围栏行/,
-  );
+  const note = "# 标题\n\n```ts\nconst a = 1;\n```\n\n段落`内联`";
+  await mf.writeNote("域", note);
+  assert.equal(mf.readNote("域"), note);
+  // 序列化（外层用更长的 ```` 围栏）→ 再解析，content 不变
+  const reparsed = parseMarkdown(serializeMarkdown(mf.root));
+  assert.equal(reparsed.children[0]!.content, note);
 });
