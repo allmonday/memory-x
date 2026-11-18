@@ -328,3 +328,4 @@ memory-x/
 | D5 | v1 交互形态 | 纯 TUI（pi CLI 扩展 + 斜杠命令），不做 Web | 已决（2026-11-16） |
 | D6 | 存储架构 | B 案：SQLite 为真相（物化 path + content） | 已决（2026-11-17） |
 | D7 | 移除镜像与 git | MEMORY.md 镜像与 git 历史移除；回滚能力以 revisions change log 形式入 SQLite（MindMap X MVCC 语义移植） | 已决（2026-11-18） |
+| D8 | 整理（做梦）触发方式 | v1 手动（/memory tidy）；自动定时/闲时触发待 M2 自动抽取一起设计（可接「每日自动整理 + 早上人审 diff」节奏） | 已决：先手动（2026-11-18） |
