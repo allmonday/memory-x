@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { tocDigest } from "../src/digest.ts";
 import { applyOutline, parseFragment } from "../src/fragment.ts";
+import { serializeOutline } from "../src/serializer.ts";
 import { parseMarkdown } from "../src/parser.ts";
 
 test("tocDigest：层级、叶子计数与截断", () => {
@@ -95,4 +96,30 @@ test("applyOutline：过大 outline 拒绝", () => {
   const root = parseMarkdown("# Memory\n");
   const big = Array.from({ length: 301 }, (_, i) => `- 事实${i}`).join("\n");
   assert.throws(() => applyOutline(root, "域", big), /过大/);
+});
+
+test("serializeOutline：叶子+子节点 round-trip（不含节点标题，可被 parseFragment 还原）", () => {
+  const root = parseMarkdown(`# Memory
+
+## 工作
+- 事实一
+- 事实二
+### 子甲
+- 甲
+#### 甲孙
+- 孙
+### 子乙
+- 乙
+`);
+  const work = root.children[0]!;
+  const outline = serializeOutline(work);
+  assert.equal(outline.includes("## 工作"), false, "不含节点自身标题");
+
+  const frag = parseFragment(outline);
+  assert.deepEqual(frag.leaves, ["事实一", "事实二"]);
+  assert.deepEqual(frag.children.map((c) => c.title), ["子甲", "子乙"]);
+  assert.deepEqual(frag.children[0]!.children[0]!.leaves, ["孙"]);
+
+  // 经 applyOutline 用自身 outline 替换应为无变化（round-trip 稳定）
+  assert.equal(applyOutline(root, "工作", outline).changed, false);
 });

@@ -50,7 +50,8 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 
 ```
 /memory                    # 看记忆目录
-/memory tidy               # 整理（做梦）：模型出方案草稿 → show 看 diff → apply 确认落盘
+/memory tidy               # 整理（做梦）：弹树选范围（节点=局部 / 整棵树=全局）→ 模型出方案草稿 → show 看 diff → apply 确认落盘
+/memory tidy <节点路径>     # 直接指定局部整理范围（懒得打路径可无参弹树选择）
 /memory tidy show|apply|discard
 /memory log                # 版本历史（change log）
 /memory rollback <id>      # 回滚到指定版本（历史保留，可再滚回来）
@@ -58,7 +59,7 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 /memory dump [--full] [文件]  # 整树导出
 ```
 
-**整理（做梦）的安全设计**：方案只进草稿不落盘；整理模式下所有写工具被 `tool_call` 拦截器封禁；落盘前人审 diff（+N/-N 行）；apply 后仍可 rollback。
+**整理（做梦）的安全设计**：方案只进草稿不落盘；整理模式下所有写工具被 `tool_call` 拦截器封禁；落盘前人审 diff（+N/-N 行）；apply 后仍可 rollback。支持**局部整理**——指定节点（或弹树选择）只重写该子树，且原样保留其 `content`（完整信息），不动树中其它部分。
 
 文法（严格模式，非法行直接报错）：
 

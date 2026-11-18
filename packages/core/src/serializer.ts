@@ -19,6 +19,26 @@ export function serializeSubtree(node: MemoryNode, level = 2): string {
   return out.join("\n");
 }
 
+/**
+ * 序列化节点的「内容大纲」（叶子 + 子节点），**不含节点自身标题、不含 content**。
+ * 与 parseFragment / applyOutline 的输入形状对齐：首个标题前的列表项归该节点自身。
+ * 用于局部整理（tidy）的素材与 diff——content 由 applyOutline 原样保留，不进 outline。
+ */
+export function serializeOutline(node: MemoryNode): string {
+  const out: string[] = [];
+  for (const leaf of node.leaves) out.push(`- ${leaf}`);
+  const emit = (children: MemoryNode[], depth: number) => {
+    for (const child of children) {
+      if (out.length > 0) out.push("");
+      out.push(`${"#".repeat(depth + 1)} ${child.title}`);
+      for (const leaf of child.leaves) out.push(`- ${leaf}`);
+      emit(child.children, depth + 1);
+    }
+  };
+  emit(node.children, 1);
+  return out.join("\n");
+}
+
 function writeBlock(out: string[], node: MemoryNode, depth: number) {
   out.push(`${"#".repeat(depth + 1)} ${node.title}`);
   for (const leaf of node.leaves) out.push(`- ${leaf}`);
