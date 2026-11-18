@@ -32,6 +32,8 @@ npm run eval:locomo -- --sample 200 --answer --topK 5  # 指定 topK
 
 参数：`--data <path>` `--conv <id>` `--limit N` `--sample N` `--seed N` `--topK N` `--answer` `--model <name>`。
 
+运行时输出**实时进度**：TTY 下原地刷新 `[i/N] xx.x% ✓/✗ conv · 类别`（检索模式用 ○/◐/●）；重定向/非 TTY 时每 25 题打一行。结尾打印检索指标、各类 J-score 与 LLM token 用量。
+
 ## 数据集：复用，不拷贝进仓库
 
 按优先级定位，**都不会写进本仓库**：

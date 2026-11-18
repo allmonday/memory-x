@@ -70,18 +70,36 @@ async function main(): Promise<void> {
 
   await mkdir(RUN_DIR, { recursive: true });
   const rows: Row[] = [];
+  const total = sel.total;
+  const isTty = Boolean(process.stdout.isTTY);
+  let done = 0;
+  let lastPrint = 0;
 
+  // 进度：TTY 下原地刷新；非 TTY（重定向）每 25 题打一行，避免刷屏
+  const report = (conv: string, cat: number, mark: string) => {
+    const pct = ((done / total) * 100).toFixed(1);
+    const line = `[${String(done).padStart(4)}/${total}] ${pct.padStart(5)}%  ${mark}  ${conv} · ${CATEGORY_NAMES[cat] ?? cat}`;
+    if (isTty) process.stdout.write(`\r${line.padEnd(90)}`);
+    else if (done === total || done - lastPrint >= 25) {
+      console.log(line);
+      lastPrint = done;
+    }
+  };
+
+  console.log(`共 ${total} 题 · topK=${TOP_K}${llm ? " · 端到端" : " · 仅检索"}`);
   for (const c of convs) {
     const qas: QA[] = sel.byConv.get(c.sample_id) ?? [];
     if (qas.length === 0) continue;
+    if (isTty && done > 0) process.stdout.write("\n");
+    console.log(`▶ ${c.sample_id}：${sessionCount(c.conversation)} sessions · ${qas.length} 题${llm ? "（含 LLM 问答）" : "（仅检索）"}`);
     const mf = await MemoryFile.open(join(RUN_DIR, c.sample_id));
     await mf.applyTree(buildOutline(c)); // 一次成型：session 节点 + 轮次叶子
-    console.log(`\n▶ ${c.sample_id}：${sessionCount(c.conversation)} sessions · ${qas.length} 题${llm ? "（含 LLM 问答）" : "（仅检索）"}`);
 
     for (const q of qas) {
       const hits = mf.search(q.question, TOP_K);
       const gold = goldSessions(q);
-      const row: Row = { conv: c.sample_id, q: q.question, cat: q.category, rank: hits.findIndex((h) => gold.has(h.path)) };
+      const rank = hits.findIndex((h) => gold.has(h.path));
+      const row: Row = { conv: c.sample_id, q: q.question, cat: q.category, rank };
       if (llm && EVAL_CATEGORIES.has(q.category)) {
         const memories = hits.map((h) => mf.renderSection(h.path) ?? "").join("\n\n---\n\n");
         row.pred = (await llm.chat(ANSWER_SYSTEM, answerUser(memories, q.question))).trim();
@@ -89,9 +107,13 @@ async function main(): Promise<void> {
         row.correct = isCorrect(verdict);
       }
       rows.push(row);
+      done++;
+      const mark = row.correct === undefined ? (rank === 0 ? "●" : rank >= 0 ? "◐" : "○") : row.correct ? "✓" : "✗";
+      report(c.sample_id, q.category, mark);
     }
     await writeFile(join(RUN_DIR, `${c.sample_id}.json`), JSON.stringify(rows.filter((r) => r.conv === c.sample_id), null, 2));
   }
+  if (isTty) process.stdout.write("\n");
 
   // ---------- 汇总 ----------
   const n = rows.length;
