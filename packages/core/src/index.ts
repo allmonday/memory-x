@@ -4,6 +4,7 @@ export { serializeMarkdown, serializeSubtree } from "./serializer.ts";
 export { tocDigest, dumpTree, type TocOptions, type DumpOptions } from "./digest.ts";
 export { parseFragment, applyOutline } from "./fragment.ts";
 export { withDirLock } from "./lock.ts";
+export { diffLines, diffStats, formatDiff, type DiffLine } from "./diff.ts";
 export { MemoryStore, STORE_DIR, DB_FILE, MAX_REVISIONS, type SearchHit } from "./store.ts";
 export { parsePath, resolvePath, splitDisambig, levenshtein } from "./path.ts";
 export { upsertNode, moveNode, deleteNode } from "./ops.ts";

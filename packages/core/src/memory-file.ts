@@ -1,7 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tocDigest, type TocOptions } from "./digest.ts";
-import { applyOutline } from "./fragment.ts";
+import { applyOutline, parseFragment } from "./fragment.ts";
 import { withDirLock } from "./lock.ts";
 import { deleteNode, moveNode, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
@@ -137,6 +137,21 @@ export class MemoryFile {
       return { ok: false, path, revision: null, changed: false };
     }
     return this.persist("delete", path);
+  }
+
+  /** 整树替换（整理/做梦）：outline 为完整新树（相对 H2 起），根不挂叶子。 */
+  async applyTree(outline: string): Promise<OpResult> {
+    const frag = parseFragment(outline);
+    if (frag.leaves.length > 0) {
+      throw new Error("整树方案中根节点下不应有列表项（根只承载子域）");
+    }
+    const count = (ns: import("./types.ts").MemoryNode[]): number =>
+      ns.reduce((s, x) => s + 1 + x.leaves.length + count(x.children), 0);
+    if (count(frag.children) > 3000) {
+      throw new Error("整树方案过大（>3000 条目）");
+    }
+    this.root.children = frag.children;
+    return this.persist("tidy", "(整树)");
   }
 
   // ---------- 版本历史 / 回滚 ----------

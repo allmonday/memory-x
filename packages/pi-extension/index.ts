@@ -16,7 +16,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   MemoryFile,
+  diffLines,
+  diffStats,
   dumpTree,
+  formatDiff,
+  parseFragment,
+  serializeMarkdown,
   tocDigest,
 } from "../core/src/index.ts";
 
@@ -27,6 +32,25 @@ const READ_MAX_CHARS = 6000;
 const AUTO_INJECT_MIN_SCORE = Number(process.env.MEMORY_X_INJECT_MIN ?? "1.0");
 
 let cache: MemoryFile | null = null;
+
+// ---------- 整理（做梦）模式状态 ----------
+let tidyMode = false;
+let tidyDraft: { outline: string; createdAt: string } | null = null;
+
+const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_move", "memory_delete", "memory_apply_outline"]);
+
+/** 整理模式下拦截写工具：方案只能走 memory_propose 草稿，确认后才落盘 */
+function gateTidyWrites(pi: any): void {
+  pi.on("tool_call", async (event: any) => {
+    if (tidyMode && TIDY_WRITE_TOOLS.has(event.toolName)) {
+      return {
+        block: true,
+        reason: "整理模式进行中：直接写入已禁用。请用 memory_propose 提交整树方案，用户确认后经 /memory tidy apply 落盘",
+      };
+    }
+    return undefined;
+  });
+}
 
 async function memory(): Promise<MemoryFile> {
   if (!cache) cache = await MemoryFile.open(MEMORY_DIR);
@@ -205,6 +229,43 @@ export default function memoryExtension(pi: any): void {
   });
 
   pi.registerTool({
+    name: "memory_propose",
+    label: "提交整理方案",
+    description:
+      "整理模式专用：提交整理后的完整记忆树方案（草稿，不落盘）。仅在收到[整理任务]时使用；用后提醒用户 /memory tidy show 查看与 /memory tidy apply 确认",
+    parameters: {
+      type: "object",
+      properties: {
+        outline: {
+          type: "string",
+          description: "整理后的完整树（markdown outline，H2=顶层域，与原树同文法）",
+        },
+        summary: { type: "string", description: "一句话说明本次整理做了什么（给用户看）" },
+      },
+      required: ["outline"],
+    },
+    async execute(_toolCallId: string, params: { outline: string; summary?: string }) {
+      // 干跑校验：能解析、规模合理，才收草稿
+      try {
+        const frag = parseFragment(params.outline);
+        if (frag.leaves.length > 0) throw new Error("根节点下不应有列表项");
+        const count = (ns: any[]): number =>
+          ns.reduce((s: number, x: any) => s + 1 + x.leaves.length + count(x.children), 0);
+        const total = count(frag.children);
+        if (total > 3000) throw new Error(`方案过大（${total} > 3000 条目）`);
+        tidyDraft = { outline: params.outline, createdAt: new Date().toISOString() };
+        return text(
+          `方案已收草稿（未落盘）：${total} 个条目。${params.summary ? `整理说明：${params.summary}\n` : ""}请提醒用户：/memory tidy show 查看 diff，/memory tidy apply 确认落盘，/memory tidy discard 丢弃`,
+        );
+      } catch (e) {
+        return text(`方案校验失败（未收草稿）：${(e as Error).message}`);
+      }
+    },
+  });
+
+  gateTidyWrites(pi);
+
+  pi.registerTool({
     name: "memory_stats",
     label: "记忆统计",
     description: "记忆树的规模统计（节点数/叶子数/顶层域）",
@@ -262,10 +323,86 @@ export default function memoryExtension(pi: any): void {
   // ---------- 命令 ----------
 
   pi.registerCommand("memory", {
-    description: "Memory X：/memory 目录 | stats 统计 | log 版本历史 | rollback <id> 回滚 | dump [文件] [--full] 导出树",
+    description: "Memory X：/memory 目录 | tidy 整理(做梦) | log 历史 | rollback <id> | stats | dump",
     handler: async (args: string, ctx: any) => {
       const m = await memory();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
+
+      if (tokens[0] === "tidy") {
+        const sub = tokens[1];
+        const m = await memory();
+
+        if (!sub) {
+          // 发起整理：整树交给模型分析，方案只进草稿；整理模式下写工具被拦截
+          tidyMode = true;
+          tidyDraft = null;
+          const tree = serializeMarkdown(m.root);
+          pi.sendMessage(
+            {
+              customType: "memory-tidy",
+              content: [
+                "[整理任务] 请分析下面的记忆树并给出整理后的完整新树方案。",
+                "整理目标：合并重复/分散的事实；理顺层级与命名；精简冗长叶子（保留要点，不丢信息）；剔除明显过期内容。",
+                "约束：保持 markdown outline 文法（H2=顶层域，叶子一行一事）；不要新建过深层级（≤5）；时间戳保留。",
+                "【禁止调用任何写工具（upsert/move/delete/apply_outline）——它们在整理模式下被拦截】。",
+                "完成后调用 memory_propose 提交完整新树（outline 参数）+ 一句话整理说明，然后告知用户用 /memory tidy show 查看、/memory tidy apply 确认。",
+                "",
+                "当前记忆树全文：",
+                "```",
+                tree,
+                "```",
+              ].join("\n"),
+              display: true,
+            },
+            { triggerTurn: true },
+          );
+          ctx.ui.notify("整理任务已发起（做梦中…）：模型将提出方案草稿，写工具已临时禁用", "info");
+          return;
+        }
+
+        if (sub === "show") {
+          if (!tidyDraft) {
+            ctx.ui.notify("没有待审方案。先用 /memory tidy 发起整理", "error");
+            return;
+          }
+          const before = serializeMarkdown(m.root).split("\n");
+          const proposed: any = { title: "Memory", leaves: [], children: parseFragment(tidyDraft.outline).children };
+          const after = serializeMarkdown(proposed).split("\n");
+          const diff = diffLines(before, after);
+          const { added, removed } = diffStats(diff);
+          ctx.ui.notify(
+            `方案草稿（${tidyDraft.createdAt.slice(0, 16).replace("T", " ")}）：+${added} / -${removed} 行\n\n${formatDiff(diff)}\n\n确认：/memory tidy apply · 丢弃：/memory tidy discard`,
+            "info",
+          );
+          return;
+        }
+
+        if (sub === "apply") {
+          if (!tidyDraft) {
+            ctx.ui.notify("没有待审方案", "error");
+            return;
+          }
+          const r = await m.applyTree(tidyDraft.outline);
+          tidyMode = false;
+          tidyDraft = null;
+          invalidateToc();
+          ctx.ui.notify(
+            r.ok ? `整理已落盘（版本 #${r.revision}，不合适可 /memory rollback 回滚）` : `落盘失败：${r.path}`,
+            "info",
+          );
+          return;
+        }
+
+        if (sub === "discard") {
+          tidyMode = false;
+          tidyDraft = null;
+          ctx.ui.notify("已丢弃方案，写工具解禁", "info");
+          return;
+        }
+
+        ctx.ui.notify("用法：/memory tidy [show|apply|discard]", "error");
+        return;
+      }
 
       if (tokens[0] === "log") {
         const n = Number(tokens[1] ?? 15);
