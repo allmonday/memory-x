@@ -24,6 +24,7 @@ import {
   sanitizeOutline,
   selectQuestions,
   sessionCount,
+  sessionRawOutline,
   sessions,
   speakers,
   type QA,
@@ -107,9 +108,11 @@ async function main(): Promise<void> {
       const [a, b] = speakers(c);
       for (let i = 0; i < all.length; i++) {
         const s = all[i]!;
-        const extracted = sanitizeOutline(await llm.chat(INGEST_SYSTEM, ingestUser(a, b, s.date, s.turns), INGEST_MAX_TOKENS));
-        // 保留 session 日期叶子（时间题需要），再接 LLM 抽取的事实/主题
-        const frag = [s.date ? `- [date] ${s.date}` : "", extracted].filter(Boolean).join("\n");
+        const extracted = sanitizeOutline(await llm.chat(INGEST_SYSTEM, ingestUser(a, b, s.date, s.turns), INGEST_MAX_TOKENS), 4);
+        // 混合：session 节点保留原文（保召回），LLM 抽取的结构化要点挂到子节点（保组织）
+        const frag = extracted
+          ? [sessionRawOutline(s), "", "### 整理要点", extracted].join("\n")
+          : sessionRawOutline(s);
         if (frag) await mf.applyOutline(`session-${s.index}`, frag);
         if (isTty) process.stdout.write(`\r  整理记忆 session ${i + 1}/${all.length} …`.padEnd(90));
       }

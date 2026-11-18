@@ -104,7 +104,7 @@ export function speakers(c: Conversation): [string, string] {
  * 把 LLM 输出规整成 parseFragment 能吃的大纲：
  * 剥代码块/强调，统一列表符号，把标题层级重映射为连续深度（避免「层级跳跃」报错）。
  */
-export function sanitizeOutline(raw: string): string {
+export function sanitizeOutline(raw: string, startLevel = 3): string {
   const out: string[] = [];
   const stack: number[] = [];
   for (const rawLine of raw.replace(/\r/g, "").split("\n")) {
@@ -117,7 +117,7 @@ export function sanitizeOutline(raw: string): string {
       const lvl = h[1]!.length;
       while (stack.length && stack[stack.length - 1]! >= lvl) stack.pop();
       stack.push(lvl);
-      out.push(`${"#".repeat(Math.min(6, 2 + stack.length))} ${title}`);
+      out.push(`${"#".repeat(Math.min(6, startLevel - 1 + stack.length))} ${title}`);
       continue;
     }
     const b = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(line);
@@ -127,19 +127,18 @@ export function sanitizeOutline(raw: string): string {
   return out.join("\n");
 }
 
+export function sessionRawOutline(s: SessionInfo): string {
+  const lines: string[] = [];
+  if (s.date) lines.push(`- [date] ${s.date}`);
+  for (const t of s.turns) lines.push(`- [${t.dia_id}] ${t.speaker}: ${t.text.replace(/\s*\n\s*/g, " ")}`);
+  return lines.join("\n");
+}
+
 /** 一段对话 → memory-x 大纲（供 MemoryFile.applyTree 一次成型） */
 export function buildOutline(c: Conversation): string {
-  const lines: string[] = [];
-  for (let s = 1; s <= sessionCount(c.conversation); s++) {
-    if (lines.length) lines.push("");
-    lines.push(`## session-${s}`);
-    const date = c.conversation[`session_${s}_date_time`];
-    if (typeof date === "string") lines.push(`- [date] ${date}`);
-    for (const t of (c.conversation[`session_${s}`] as Turn[] | undefined) ?? []) {
-      lines.push(`- [${t.dia_id}] ${t.speaker}: ${t.text.replace(/\s*\n\s*/g, " ")}`);
-    }
-  }
-  return lines.join("\n");
+  return sessions(c)
+    .map((s) => [`## session-${s.index}`, sessionRawOutline(s)].join("\n"))
+    .join("\n\n");
 }
 
 /** 该题的 gold 物化路径集合（evidence dia_id → session-N） */
