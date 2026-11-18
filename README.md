@@ -44,6 +44,8 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 ```
 /memory                 # 看记忆目录
 /memory stats           # 规模统计
+/memory log             # 版本历史（change log）
+/memory rollback <id>  # 回滚到指定版本（历史保留，可再回滚回来）
 /memory dump --full     # 整树导出到文件
 ```
 
@@ -67,7 +69,8 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 ## 测试
 
 ```bash
-npm test        # 43 项：文法/路径/操作/存储/迁移/锁/往返 fuzz
+npm test        # 56 项：文法/路径/操作/存储/版本回滚/检索/迁移/锁/fuzz
+npm run eval     # 检索质量评估（hit@1/@3/MRR，题集本地保存）
 npm run crash-verify   # 写入中 SIGKILL，验证文件完好
 ```
 
@@ -77,10 +80,10 @@ npm run crash-verify   # 写入中 SIGKILL，验证文件完好
 
 - [x] M0 核心库（解析/寻址/原子写/git）
 - [x] M1 pi 扩展最小闭环（5 工具 + TOC 注入）
-- [x] B 案存储（SQLite 真相 + 镜像 + 物化链路）
+- [x] B 案存储（SQLite 真相 + 物化链路）
+- [x] 版本历史与回滚（revisions change log，移植自 MindMap X MVCC 语义）
+- [x] M3 检索（FTS + 自动召回 + 评估 0.73）
 - [ ] M2 自动抽取（turn_end → codemodel 判断 → 入图）
-- [ ] M3 检索（FTS5 → 向量 → RRF，命中返回链路）
-- [ ] M4 评估集与调优
 
 详见 [PLAN.md](./PLAN.md)。
 

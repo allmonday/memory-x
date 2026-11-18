@@ -1,30 +1,28 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { atomicWriteFile } from "./atomic.ts";
 import { tocDigest, type TocOptions } from "./digest.ts";
-import { snapshot } from "./git.ts";
 import { applyOutline } from "./fragment.ts";
 import { withDirLock } from "./lock.ts";
 import { deleteNode, moveNode, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
 import { resolvePath } from "./path.ts";
-import { serializeMarkdown, serializeSubtree } from "./serializer.ts";
+import { serializeSubtree } from "./serializer.ts";
 import { MemoryStore } from "./store.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
 
 export const MEMORY_FILE = "MEMORY.md";
 const EMPTY_DOC = "# Memory\n";
-const DATA_GITIGNORE = ".memory/\n*.tmp\n.memory.lock\n";
 
 /**
- * 记忆文件对象（B 案存储架构）：
+ * 记忆文件对象（B 案存储 + 版本历史）：
  *
- *   真相源   .memory/memory.db（nodes 表，含物化 path 完整链路与 content 字段）
- *   镜像    MEMORY.md（每次写入后导出，含 fenced content；可完整重建 db，即备份）
- *   历史    git 只跟踪镜像（人类可读 diff；db 不入库）
+ *   真相源   .memory/memory.db（nodes 表 + revisions 变更日志）
+ *   版本历史  每次 persist 记一条整树快照（MAX_REVISIONS 内保留）；
+ *            回滚 = 加载快照落为新版本（历史不改写，可再回滚回来）
+ *   崩溃安全  SQLite WAL 事务（无镜像文件、无 git）
  *
  * 工作模型：open 时整树载入内存，操作改内存树，persist 整树单事务写回 +
- * 镜像导出 + git 快照。崩溃窗口内镜像可能落后于 db，以 db 为准。
+ * 记版本 + 重建检索索引。旧版 Markdown 数据在 db 为空时自动导入（一次性）。
  */
 export class MemoryFile {
   readonly dir: string;
@@ -39,18 +37,10 @@ export class MemoryFile {
 
   static async open(dir: string): Promise<MemoryFile> {
     await mkdir(dir, { recursive: true });
-    // 数据目录自身的 .gitignore：别把 db 提交进镜像仓库
-    const gi = join(dir, ".gitignore");
-    try {
-      await readFile(gi, "utf8");
-    } catch {
-      await writeFile(gi, DATA_GITIGNORE, "utf8");
-    }
-
     const store = MemoryStore.open(dir);
     let root: MemoryNode;
     if (store.isEmpty()) {
-      // 迁移：db 为空但存在旧版 MEMORY.md（M1 之前的数据）→ 导入
+      // 迁移：db 为空但存在旧版 MEMORY.md（镜像时代的遗留）→ 导入并记为首个版本
       let md = EMPTY_DOC;
       try {
         md = await readFile(join(dir, MEMORY_FILE), "utf8");
@@ -60,17 +50,18 @@ export class MemoryFile {
       root = parseMarkdown(md);
       if (root.children.length > 0 || root.leaves.length > 0) {
         store.saveTree(root);
+        store.rebuildFts();
+        store.recordRevision("import", null, root);
       }
     } else {
       root = store.loadTree();
-      // 旧库（检索层上线前的数据）无索引 → 补建
       if (store.ftsIsEmpty()) store.rebuildFts();
+      // 版本历史上线前的存量数据 → 记基线版本
+      if (store.revisionCount() === 0) {
+        store.recordRevision("baseline", null, root);
+      }
     }
     return new MemoryFile(dir, root, store);
-  }
-
-  get filePath(): string {
-    return join(this.dir, MEMORY_FILE);
   }
 
   get dbPath(): string {
@@ -98,25 +89,28 @@ export class MemoryFile {
     return hits;
   }
 
+  /** 记录访问信号（工具 read 命中时调用，P5 排序燃料）。 */
+  recordAccess(path: string): void {
+    this.store.recordAccess([path]);
+  }
+
   /** 节点完整信息（content）。 */
   readNote(path: string): string | null {
     return this.readSection(path)?.node.content ?? null;
   }
 
-  /** 写节点完整信息（RAG 语料）。 */
+  /** 写节点完整信息（RAG 语料）。content 不得含围栏行（markdown 导出不变式）。 */
   async writeNote(path: string, content: string): Promise<OpResult> {
     const r = this.readSection(path);
     if (!r) return { ok: false, path, revision: null, changed: false };
+    if (/^\s*```\s*$/m.test(content)) {
+      throw new Error(`节点 "${path}" 的 content 含围栏行，无法存储`);
+    }
     if (r.node.content === content) {
       return { ok: true, path, revision: null, changed: false };
     }
     r.node.content = content;
     return this.persist("note", path);
-  }
-
-  /** 记录访问信号（工具 read 命中时调用，P5 排序燃料）。 */
-  recordAccess(path: string): void {
-    this.store.recordAccess([path]);
   }
 
   async upsertNode(path: string, leaf: string): Promise<OpResult> {
@@ -145,13 +139,30 @@ export class MemoryFile {
     return this.persist("delete", path);
   }
 
+  // ---------- 版本历史 / 回滚 ----------
+
+  listRevisions(limit?: number) {
+    return this.store.listRevisions(limit);
+  }
+
+  /** 回滚到指定版本：加载快照 → 落为新版本（历史不改写，可再次回滚回来）。 */
+  async restoreRevision(id: number): Promise<OpResult> {
+    const tree = this.store.getRevisionTree(id);
+    if (!tree) return { ok: false, path: `#${id}`, revision: null, changed: false };
+    if (JSON.stringify(tree) === JSON.stringify(this.root)) {
+      return { ok: true, path: `#${id}`, revision: null, changed: false };
+    }
+    this.root = tree;
+    return this.persist("restore", `#${id}`);
+  }
+
   private async persist(op: string, path: string): Promise<OpResult> {
     const revision = await withDirLock(this.dir, async () => {
       this.store.saveTree(this.root); // 真相：整树单事务
-      this.store.rebuildFts(); // 派生索引（毫秒级整重建）
-      await atomicWriteFile(this.filePath, serializeMarkdown(this.root)); // 镜像
-      return snapshot(this.dir, `memory: ${op} ${path}`); // 历史（仅镜像）
+      const rev = this.store.recordRevision(op, path, this.root); // change log
+      this.store.rebuildFts(); // 派生索引
+      return rev;
     });
-    return { ok: true, path, revision, changed: true };
+    return { ok: true, path, revision: String(revision), changed: true };
   }
 }

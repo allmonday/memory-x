@@ -97,7 +97,7 @@ export default function memoryExtension(pi: any): void {
       const m = await memory();
       const r = await m.upsertNode(params.path, params.leaf);
       if (r.changed) invalidateToc();
-      return text(r.changed ? `已写入 ${r.path}（rev ${short(r.revision)}）` : `已存在，无需写入：${r.path}`);
+      return text(r.changed ? `已写入 ${r.path}（版本 #${r.revision}，可用 /memory rollback 回滚）` : `已存在，无需写入：${r.path}`);
     },
   });
 
@@ -139,7 +139,7 @@ export default function memoryExtension(pi: any): void {
       try {
         const r = await m.applyOutline(params.path, params.outline);
         if (r.changed) invalidateToc();
-        return text(r.changed ? `已重构 ${r.path}（rev ${short(r.revision)}）` : `内容无变化：${r.path}`);
+        return text(r.changed ? `已重构 ${r.path}（版本 #${r.revision}）` : `内容无变化：${r.path}`);
       } catch (e) {
         return text(`outline 应用失败：${(e as Error).message}`);
       }
@@ -177,6 +177,28 @@ export default function memoryExtension(pi: any): void {
         return `${i + 1}. ${chain}${meta ? `（${meta}）` : ""}\n   ${h.snippet}`;
       });
       return text(`命中 ${hits.length} 条：\n${lines.join("\n")}\n（取全文：memory_read 对应路径）`);
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_delete",
+    label: "删除记忆子树",
+    description:
+      "删除指定子树（含共全部叶子与后代，可 /memory rollback 回滚）。仅在不有意义地清理元余/过时内容时使用",
+    parameters: {
+      type: "object",
+      properties: { path: pathParam },
+      required: ["path"],
+    },
+    async execute(_toolCallId: string, params: { path: string }) {
+      const m = await memory();
+      const r = await m.deleteNode(params.path);
+      if (r.ok) invalidateToc();
+      return text(
+        r.ok
+          ? `已删除 ${params.path}（版本 #${r.revision}，可 /memory rollback 回滚）`
+          : `删除失败（路径不存在）：${params.path}`,
+      );
     },
   });
 
@@ -242,10 +264,38 @@ export default function memoryExtension(pi: any): void {
   // ---------- 命令 ----------
 
   pi.registerCommand("memory", {
-    description: "Memory X：/memory 目录 | /memory stats 统计 | /memory dump [文件] [--full] 导出树",
+    description: "Memory X：/memory 目录 | stats 统计 | log 版本历史 | rollback <id> 回滚 | dump [文件] [--full] 导出树",
     handler: async (args: string, ctx: any) => {
       const m = await memory();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
+
+      if (tokens[0] === "log") {
+        const n = Number(tokens[1] ?? 15);
+        const revs = m.listRevisions(Number.isFinite(n) && n > 0 ? n : 15);
+        if (revs.length === 0) {
+          ctx.ui.notify("暂无版本历史", "info");
+          return;
+        }
+        const lines = revs.map((r) => `#${r.id} [${r.created_at}] ${r.op}${r.path ? ` ${r.path}` : ""}`);
+        ctx.ui.notify(`版本历史（最近 ${revs.length} 条，回滚：/memory rollback <id>）：\n${lines.join("\n")}`, "info");
+        return;
+      }
+
+      if (tokens[0] === "rollback") {
+        const id = Number(tokens[1]);
+        if (!Number.isInteger(id) || id <= 0) {
+          ctx.ui.notify("用法：/memory rollback <版本id>（用 /memory log 查询）", "error");
+          return;
+        }
+        const r = await m.restoreRevision(id);
+        if (r.ok) {
+          invalidateToc();
+          ctx.ui.notify(r.changed ? `已回滚到 #${id}（新版本 #${r.revision}，历史保留，可再回滚回来）` : `当前已是 #${id} 的状态，无需回滚`, "info");
+        } else {
+          ctx.ui.notify(`版本 #${id} 不存在（用 /memory log 查询可用版本）`, "error");
+        }
+        return;
+      }
 
       if (tokens[0] === "stats") {
         const s = collectStats(m.root);
@@ -269,10 +319,6 @@ export default function memoryExtension(pi: any): void {
       ctx.ui.notify(`记忆目录（${MEMORY_DIR}）：\n${tocDigest(m.root)}`, "info");
     },
   });
-}
-
-function short(rev: string | null): string {
-  return rev ? rev.slice(0, 7) : "-";
 }
 
 function collectStats(root: any): { nodes: number; leaves: number; depth: number } {

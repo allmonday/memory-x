@@ -1,4 +1,4 @@
-// 崩溃安全验证（M0 DoD）：循环写入中 SIGKILL，验证 MEMORY.md 始终可解析
+// 崩溃安全验证（WAL 事务）：循环写入中 SIGKILL，验证 db 完好可打开
 // 用法：npm run crash-verify
 import { MemoryFile } from "../packages/core/src/memory-file.ts";
 import { mkdtemp } from "node:fs/promises";

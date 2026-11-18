@@ -34,7 +34,18 @@ CREATE TABLE IF NOT EXISTS access(
   hits INTEGER NOT NULL DEFAULT 0,
   last_hit INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS revisions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  op TEXT NOT NULL,
+  path TEXT,
+  actor TEXT NOT NULL DEFAULT 'pi',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  tree TEXT NOT NULL
+);
 `;
+
+/** 历史快照保留上限（超过后裁剪最旧版本；个人规模 ≈ 几 MB） */
+export const MAX_REVISIONS = 500;
 
 interface NodeRow {
   id: number;
@@ -331,6 +342,42 @@ export class MemoryStore {
     );
     const now = Date.now();
     for (const p of paths) stmt.run(p, now);
+  }
+
+  // ---------- 版本历史（change log，移植自 MindMap X 的 MVCC 语义） ----------
+  // 差异：MindMap X 逐节点 before 增量 + 回溯物化；这里整树 JSON 快照，
+  // restore = 加载快照，零物化逻辑。共同不变式：回滚是前进（新版本），
+  // 历史永不改写。
+
+  /** 记录一次变更（操作后的整树快照），返回版本号。 */
+  recordRevision(op: string, path: string | null, tree: unknown, actor = "pi"): number {
+    const info = this.db
+      .prepare("INSERT INTO revisions(op, path, actor, tree) VALUES (?, ?, ?, ?)")
+      .run(op, path, actor, JSON.stringify(tree));
+    // 裁剪最旧历史
+    this.db.exec(
+      `DELETE FROM revisions WHERE id <= (SELECT MAX(id) - ${MAX_REVISIONS} FROM revisions)`,
+    );
+    return Number(info.lastInsertRowid);
+  }
+
+  revisionCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM revisions").get() as { n: number };
+    return row.n;
+  }
+
+  listRevisions(limit = 20): Array<{ id: number; op: string; path: string | null; actor: string; createdAt: string }> {
+    return this.db
+      .prepare("SELECT id, op, path, actor, created_at FROM revisions ORDER BY id DESC LIMIT ?")
+      .all(limit) as Array<{ id: number; op: string; path: string | null; actor: string; createdAt: string }>;
+  }
+
+  /** 取某版本的整树快照（不存在返回 null）。 */
+  getRevisionTree(id: number): MemoryNode | null {
+    const row = this.db.prepare("SELECT tree FROM revisions WHERE id = ?").get(id) as
+      | { tree: string }
+      | undefined;
+    return row ? (JSON.parse(row.tree) as MemoryNode) : null;
   }
 
   close(): void {
