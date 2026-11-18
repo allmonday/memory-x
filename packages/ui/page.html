@@ -24,13 +24,17 @@
           display: flex; flex-direction: column; min-height: 0; }
   #searchbar { padding: 10px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
   #searchbar input { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+  #treebar { display: flex; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .toolbtn { flex: 1; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+             background: var(--panel); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+  .toolbtn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
   #tree { flex: 1; overflow: auto; padding: 8px; }
   .node { user-select: none; }
   .node .row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px;
                cursor: pointer; white-space: nowrap; }
   .node .row:hover { background: var(--accent-bg); }
   .node .row.active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
-  .node .caret { width: 12px; color: var(--dim); font-size: 10px; flex: none; }
+  .node .caret { width: 14px; color: var(--dim); font-size: 10px; flex: none; cursor: pointer; text-align: center; }
   .node .count { color: var(--dim); font-size: 11px; }
   .node .diamond { color: var(--accent); font-size: 11px; }
   #content { flex: 1; overflow: auto; padding: 20px 24px; min-width: 0; }
@@ -99,6 +103,10 @@
   <div id="side">
     <div id="searchbar">
       <input id="q" placeholder="搜索记忆…（回车）">
+    </div>
+    <div id="treebar">
+      <button id="expand-all" class="toolbtn" title="展开全部节点">展开全部</button>
+      <button id="collapse-all" class="toolbtn" title="折叠全部节点">折叠全部</button>
     </div>
     <div id="tree"></div>
   </div>
@@ -298,32 +306,8 @@ async function renderMermaid(root) {
 function renderTree() {
   const el = $("#tree");
   el.innerHTML = "";
-  const build = (nodes, depth) => {
-    for (const n of nodes) {
-      const wrap = document.createElement("div");
-      wrap.className = "node";
-      const row = document.createElement("div");
-      row.className = "node-row row";
-      row.style.paddingLeft = `${6 + depth * 14}px`;
-      const hasKids = n.children.length > 0;
-      const open = expanded.has(n.path);
-      row.innerHTML = `<span class="caret">${hasKids ? (open ? "▼" : "▶") : "·"}</span>
-        <span class="t">${esc(n.title)}</span>
-        ${n.leafTotal > 0 ? `<span class="count">${n.leafTotal}</span>` : ""}
-        ${n.hasContent ? `<span class="diamond">◆</span>` : ""}`;
-      row.onclick = () => {
-        if (hasKids) { open ? expanded.delete(n.path) : expanded.add(n.path); renderTree(); }
-        showNode(n);
-      };
-      wrap.appendChild(row);
-      if (hasKids && open) wrap.appendChild(build(n.children, depth + 1));
-      el.appendChild(wrap);
-    }
-    return el;
-  };
-  // 重新挂载方式构建子容器（简化：整体重绘）
   const frag = document.createDocumentFragment();
-  const buildFrag = (nodes, depth, parent) => {
+  const build = (nodes, depth, parent) => {
     for (const n of nodes) {
       const wrap = document.createElement("div");
       wrap.className = "node";
@@ -333,24 +317,33 @@ function renderTree() {
       const hasKids = n.children.length > 0;
       const open = expanded.has(n.path);
       const caret = document.createElement("span");
-      caret.className = "caret"; caret.textContent = hasKids ? (open ? "▼" : "▶") : "·";
+      caret.className = "caret";
+      caret.textContent = hasKids ? (open ? "▼" : "▶") : "·";
+      // 只有点击箭头才切换展开/折叠（阻止冒泡，避免同时选中）
+      caret.onclick = (e) => {
+        if (!hasKids) return;
+        e.stopPropagation();
+        expanded.has(n.path) ? expanded.delete(n.path) : expanded.add(n.path);
+        renderTree();
+        saveUrlState();
+      };
       const t = document.createElement("span"); t.className = "t"; t.textContent = n.title;
       row.append(caret, t);
       if (n.leafTotal > 0) { const c = document.createElement("span"); c.className = "count"; c.textContent = n.leafTotal; row.append(c); }
       if (n.hasContent) { const d = document.createElement("span"); d.className = "diamond"; d.textContent = "◆"; row.append(d); }
       if (n.path === ACTIVE) row.classList.add("active");
+      // 点击行本身只选中节点，不影响展开态
       row.onclick = () => {
-        if (hasKids) expanded.has(n.path) ? expanded.delete(n.path) : expanded.add(n.path);
         showNode(n);
         renderTree();
         saveUrlState();
       };
       wrap.appendChild(row);
-      if (hasKids && open) buildFrag(n.children, depth + 1, wrap);
+      if (hasKids && open) build(n.children, depth + 1, wrap);
       parent.appendChild(wrap);
     }
   };
-  buildFrag(TREE, 0, frag);
+  build(TREE, 0, frag);
   el.appendChild(frag);
 }
 
@@ -360,6 +353,14 @@ function findByPath(path) {
   walk(TREE);
   return found;
 }
+
+// 展开/折叠全部（一键）：收集所有含子节点的路径；同步写入 URL 展开态
+function allParentPaths(nodes, acc = []) {
+  for (const n of nodes) { if (n.children.length) { acc.push(n.path); allParentPaths(n.children, acc); } }
+  return acc;
+}
+function expandAll() { for (const p of allParentPaths(TREE)) expanded.add(p); renderTree(); saveUrlState(); }
+function collapseAll() { expanded.clear(); renderTree(); saveUrlState(); }
 
 // ---------- 视图 ----------
 function switchView(id) {
@@ -461,6 +462,8 @@ $("#rev").title = "点击查看版本历史";
 $("#rev").onclick = showHistory;
 
 $("#q").onkeydown = (e) => { if (e.key === "Enter" && e.target.value.trim()) showSearch(e.target.value.trim()); };
+$("#expand-all").onclick = expandAll;
+$("#collapse-all").onclick = collapseAll;
 
 // ---------- 初始化 + 轮询 ----------
 async function refresh() {
