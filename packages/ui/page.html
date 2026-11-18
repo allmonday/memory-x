@@ -39,9 +39,31 @@
   .crumb b { color: var(--accent); }
   h2.nd-title { font-size: 18px; margin-bottom: 12px; }
   ul.leaves { list-style: none; margin: 0 0 16px; }
-  ul.leaves li { padding: 4px 0 4px 14px; border-left: 2px solid var(--border); margin-left: 2px; }
+  ul.leaves li { padding: 4px 0 4px 14px; margin-left: 2px; }
   .content-block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
                    padding: 14px 16px; white-space: pre-wrap; font: 13px/1.7 ui-monospace, monospace; }
+  /* Markdown 渲染 */
+  .content-block.md { white-space: normal; font: 14px/1.7 ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 16px 0 8px; line-height: 1.3; }
+  .md h1 { font-size: 20px; } .md h2 { font-size: 17px; } .md h3 { font-size: 15px; }
+  .md h4, .md h5, .md h6 { font-size: 14px; color: var(--dim); }
+  .md p { margin: 0 0 10px; }
+  .md ul, .md ol { margin: 0 0 10px; padding-left: 24px; }
+  .md li { margin: 2px 0; }
+  .md a { color: var(--accent); }
+  .md code { background: #f1f0ef; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px;
+             font: 12px/1.5 ui-monospace, monospace; }
+  .md pre.md-code { background: #f8f7f6; border: 1px solid var(--border); border-radius: 8px;
+                    padding: 10px 12px; overflow: auto; margin: 0 0 10px; }
+  .md pre.md-code code { background: none; border: 0; padding: 0; font-size: 12.5px; }
+  .md blockquote { margin: 0 0 10px; padding: 2px 12px; border-left: 3px solid var(--border); color: var(--dim); }
+  .md hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+  .md table { border-collapse: collapse; margin: 0 0 10px; font-size: 13px; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+  .md th { background: var(--accent-bg); }
+  .md img { max-width: 100%; }
+  .md .mermaid { margin: 0 0 10px; text-align: center; }
   .section-title { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin: 18px 0 8px; }
   .hit { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px;
          background: var(--panel); cursor: pointer; }
@@ -98,8 +120,181 @@ async function api(path) {
   return r.json();
 }
 
+// ---------- URL 状态持久化 ----------
+// #open=<JSON 路径数组>&node=<路径>：刷新/分享链接后保留展开态与当前节点
+let ACTIVE = null;
+const urlParams = () => new URLSearchParams(location.hash.replace(/^#/, ""));
+function readExpanded() {
+  try {
+    const raw = urlParams().get("open");
+    if (raw) return new Set(JSON.parse(raw));
+  } catch {}
+  return new Set();
+}
+const expanded = readExpanded();
+function saveUrlState() {
+  const p = new URLSearchParams();
+  if (expanded.size) p.set("open", JSON.stringify([...expanded]));
+  if (ACTIVE) p.set("node", ACTIVE);
+  const s = p.toString();
+  history.replaceState(null, "", s ? `#${s}` : location.pathname + location.search);
+}
+// 累积祖先路径（不含自身）
+const ancestors = (p) => p.split("/").slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join("/"));
+
+// ---------- Markdown 渲染（无依赖子集） ----------
+// 先 escape，再只生成自有标签；不解析原始 HTML，避免记忆文本注入。
+function safeUrl(u) {
+  u = String(u ?? "").trim();
+  if (/^(https?:|mailto:|data:image\/)/i.test(u)) return u;
+  if (u.startsWith("#") || u.startsWith("/") || u.startsWith(".")) return u; // 锚点 / 相对路径
+  return "#";
+}
+function inlineMd(text) {
+  const stash = [];
+  const keep = (html) => { stash.push(html); return `\u0000${stash.length - 1}\u0000`; };
+  let t = String(text ?? "");
+  t = t.replace(/`([^`]+)`/g, (_, c) => keep(`<code>${esc(c)}</code>`));
+  t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, src) => keep(`<img alt="${esc(alt)}" src="${esc(safeUrl(src))}">`));
+  t = t.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+    (_, txt, href) => keep(`<a href="${esc(safeUrl(href))}" target="_blank" rel="noopener noreferrer">${inlineMd(txt)}</a>`));
+  t = t.replace(/(^|[\s(])(https?:\/\/[^\s<>()]+)/g,
+    (m, pre, u) => pre + keep(`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a>`));
+  t = esc(t);
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[+i]);
+  return t;
+}
+function parseList(lines, start, baseIndent) {
+  const ordered = /^\s*\d+[.)]\s+/.test(lines[start]);
+  const tag = ordered ? "ol" : "ul";
+  const n = lines.length;
+  const indentOf = (l) => l.match(/^\s*/)[0].length;
+  const itemRe = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+  let html = `<${tag}>`, i = start;
+  while (i < n) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      let j = i + 1;
+      while (j < n && lines[j].trim() === "") j++;
+      if (j < n && indentOf(lines[j]) >= baseIndent && itemRe.test(lines[j])) { i = j; continue; }
+      break;
+    }
+    const m = line.match(itemRe);
+    if (!m) break;
+    const indent = m[1].length;
+    if (indent < baseIndent) break;
+    if (indent > baseIndent) { // 嵌套在上一项下
+      const [sub, ni] = parseList(lines, i, indent);
+      html = html.replace(/<\/li>$/, sub + "</li>");
+      i = ni; continue;
+    }
+    let content = m[3], cb = "";
+    const tm = content.match(/^\[([ xX])\]\s+(.*)$/);
+    if (tm) { cb = `<input type="checkbox" disabled${tm[1].toLowerCase() === "x" ? " checked" : ""}> `; content = tm[2]; }
+    i++;
+    const sub = [];
+    while (i < n) {
+      const l = lines[i];
+      if (l.trim() === "") {
+        let j = i + 1;
+        while (j < n && lines[j].trim() === "") j++;
+        if (j < n && indentOf(lines[j]) > indent) { sub.push(""); i++; continue; }
+        break;
+      }
+      if (indentOf(l) > indent) { sub.push(l.slice(Math.min(indent + 2, indentOf(l)))); i++; continue; }
+      if (itemRe.test(l)) break;
+      sub.push(l.trim()); i++;
+    }
+    let inner = inlineMd(content);
+    if (sub.length) {
+      const looksBlock = /^\s*([-*+]|\d+[.)])\s|^\s*(`{3,}|~{3,})|^\s*#{1,6}\s|^\s*>/.test(sub[0]);
+      inner += looksBlock ? renderMarkdown(sub.join("\n")) : "<br>" + sub.map((s) => s.trim()).filter(Boolean).map(inlineMd).join("<br>");
+    }
+    html += `<li>${cb}${inner}</li>`;
+  }
+  return [html + `</${tag}>`, i];
+}
+function renderMarkdown(src) {
+  const lines = String(src ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const n = lines.length;
+  const indentOf = (l) => l.match(/^\s*/)[0].length;
+  const isItem = (l) => /^\s*([-*+]|\d+[.)])\s+/.test(l);
+  let out = "", i = 0;
+  const para = [];
+  const flush = () => { if (para.length) { out += `<p>${para.map(inlineMd).join("<br>")}</p>`; para.length = 0; } };
+  while (i < n) {
+    const line = lines[i];
+    if (line.trim() === "") { flush(); i++; continue; }
+    const fence = line.match(/^\s*(`{3,}|~{3,})\s*([\w+#.-]*)\s*$/);
+    if (fence) {
+      flush();
+      const marker = fence[1][0], lang = fence[2] || "";
+      const closeRe = new RegExp("^\\s*" + marker + "{3,}\\s*$");
+      const buf = []; i++;
+      while (i < n && !closeRe.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < n) i++;
+      const code = buf.join("\n");
+      out += lang.toLowerCase() === "mermaid"
+        ? `<div class="mermaid">${esc(code)}</div>`
+        : `<pre class="md-code"><code${lang ? ` class="language-${esc(lang)}"` : ""}>${esc(code)}</code></pre>`;
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+    if (h) { flush(); const lv = h[1].length; out += `<h${lv}>${inlineMd(h[2])}</h${lv}>`; i++; continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flush(); out += "<hr>"; i++; continue; }
+    if (/^\s*>/.test(line)) {
+      flush();
+      const buf = [];
+      while (i < n && /^\s*>/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
+      out += `<blockquote>${renderMarkdown(buf.join("\n"))}</blockquote>`;
+      continue;
+    }
+    if (line.includes("|") && i + 1 < n && /^[\s|:-]+$/.test(lines[i + 1]) && lines[i + 1].includes("-") && lines[i + 1].includes("|")) {
+      flush();
+      const cells = (l) => l.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+      const head = cells(line); i += 2;
+      let body = "";
+      while (i < n && lines[i].includes("|") && lines[i].trim() !== "") {
+        body += "<tr>" + cells(lines[i]).map((c) => `<td>${inlineMd(c)}</td>`).join("") + "</tr>";
+        i++;
+      }
+      out += `<table><thead><tr>${head.map((c) => `<th>${inlineMd(c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+      continue;
+    }
+    if (isItem(line)) { flush(); const [html, ni] = parseList(lines, i, indentOf(line)); out += html; i = ni; continue; }
+    para.push(line.trim()); i++;
+  }
+  flush();
+  return out;
+}
+// mermaid：按需惰性加载（CDN）；失败则退化为源码块
+let mermaidLib = null;
+async function renderMermaid(root) {
+  const nodes = [...root.querySelectorAll(".mermaid")];
+  if (!nodes.length) return;
+  try {
+    if (!mermaidLib) {
+      const mod = await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs");
+      mermaidLib = mod.default ?? mod;
+      mermaidLib.initialize({ startOnLoad: false, securityLevel: "strict" });
+    }
+    await mermaidLib.run({ nodes });
+  } catch {
+    for (const el of nodes) {
+      const pre = document.createElement("pre");
+      pre.className = "md-code";
+      const code = document.createElement("code");
+      code.textContent = el.textContent;
+      pre.appendChild(code);
+      el.replaceWith(pre);
+    }
+  }
+}
+
 // ---------- 树 ----------
-const expanded = new Set();
 function renderTree() {
   const el = $("#tree");
   el.innerHTML = "";
@@ -143,11 +338,12 @@ function renderTree() {
       row.append(caret, t);
       if (n.leafTotal > 0) { const c = document.createElement("span"); c.className = "count"; c.textContent = n.leafTotal; row.append(c); }
       if (n.hasContent) { const d = document.createElement("span"); d.className = "diamond"; d.textContent = "◆"; row.append(d); }
+      if (n.path === ACTIVE) row.classList.add("active");
       row.onclick = () => {
-        if (hasKids) { expanded.has(n.path) ? expanded.delete(n.path) : expanded.add(n.path); renderTree(); }
+        if (hasKids) expanded.has(n.path) ? expanded.delete(n.path) : expanded.add(n.path);
         showNode(n);
-        document.querySelectorAll(".row.active").forEach((x) => x.classList.remove("active"));
-        row.classList.add("active");
+        renderTree();
+        saveUrlState();
       };
       wrap.appendChild(row);
       if (hasKids && open) buildFrag(n.children, depth + 1, wrap);
@@ -172,30 +368,26 @@ function switchView(id) {
 }
 
 function showNode(n) {
+  ACTIVE = n.path;
   switchView("#v-node");
   const segs = n.path.split("/");
   const crumb = segs.map((s, i) => (i === segs.length - 1 ? `<b>${esc(s)}</b>` : esc(s))).join(" › ");
   let html = `<div class="crumb">${crumb}</div><h2 class="nd-title">${esc(n.title)}</h2>`;
   if (n.leaves.length > 0) {
-    html += `<div class="section-title">事实（${n.leaves.length}）</div><ul class="leaves">` +
-      n.leaves.map((l) => `<li>${esc(l)}</li>`).join("") + "</ul>";
+    html += `<ul class="leaves">` +
+      n.leaves.map((l) => `<li>${inlineMd(l)}</li>`).join("") + "</ul>";
   }
   if (n.content != null) {
-    html += `<div class="section-title">完整信息（content ◆）</div><div class="content-block">${esc(n.content)}</div>`;
+    html += `<div class="section-title">完整信息（content ◆）</div><div class="content-block md">${renderMarkdown(n.content)}</div>`;
   }
-  if (n.children.length > 0) {
-    html += `<div class="section-title">子节点（${n.children.length}）</div><ul class="leaves">` +
-      n.children.map((c) => `<li data-path="${esc(c.path)}" style="cursor:pointer">${esc(c.title)} <span class="count">${c.leafTotal || ""}</span></li>`).join("") + "</ul>";
-  }
-  if (n.leaves.length === 0 && n.content == null && n.children.length === 0) {
-    html += `<div class="empty">（空节点）</div>`;
+  if (n.leaves.length === 0 && n.content == null) {
+    html += n.children.length > 0
+      ? `<div class="empty">子节点见左侧目录（${n.children.length}）</div>`
+      : `<div class="empty">（空节点）</div>`;
   }
   $("#v-node").innerHTML = html;
-  $("#v-node").querySelectorAll("li[data-path]").forEach((li) => {
-    li.onclick = () => { const t = findByPath(li.dataset.path); if (t) { expanded.add(parentPath(t.path)); renderTree(); showNode(t); } };
-  });
+  renderMermaid($("#v-node"));
 }
-const parentPath = (p) => p.split("/").slice(0, -1).join("/");
 
 async function showSearch(q) {
   switchView("#v-search");
@@ -211,14 +403,12 @@ async function showSearch(q) {
   $("#v-search").querySelectorAll(".hit").forEach((el) => {
     el.onclick = () => {
       const p = el.dataset.path;
-      // 展开祖先
-      const segs = p.split("/");
-      for (let i = 1; i <= segs.length; i++) expanded.add(segs.slice(0, i).join("/"));
-      renderTree();
+      for (const seg of ancestors(p)) expanded.add(seg); // 展开祖先链
+      expanded.add(p);
       const n = findByPath(p);
-      if (n) showNode(n); else { // 重名消歧路径可能对不上树里的 title 展开，退化为搜索态
-        $("#v-search").innerHTML += "";
-      }
+      if (n) showNode(n); // 重名消歧路径可能对不上树里的 title，此时退化为搜索态
+      renderTree();
+      saveUrlState();
     };
   });
 }
@@ -278,10 +468,20 @@ async function refresh() {
   TREE = treeD.tree;
   $("#stats").textContent = `${stats.nodes} 节点 · ${stats.leaves} 事实 · 深度 ${stats.depth}`;
   $("#rev").textContent = `版本 #${ping.latest}（点击看历史）`;
+  const want = ACTIVE ?? urlParams().get("node");
+  if (want && findByPath(want)) ACTIVE = want; // 恢复 URL 中的当前节点
   renderTree();
-  if (!$("#v-node").innerHTML) showNode(TREE[0] ?? { title: "（空）", path: "", leaves: [], content: null, children: [] });
+  if (!$("#v-node").innerHTML) {
+    showNode(findByPath(ACTIVE) ?? TREE[0] ?? { title: "（空）", path: "", leaves: [], content: null, children: [] });
+    saveUrlState();
+  }
 }
 await refresh();
+window.addEventListener("hashchange", () => {
+  expanded.clear();
+  for (const p of readExpanded()) expanded.add(p);
+  renderTree();
+});
 setInterval(async () => {
   try {
     const ping = await api("/api/ping");
