@@ -21,12 +21,15 @@ import {
   buildOutline,
   goldSessions,
   resolveDataset,
+  sanitizeOutline,
   selectQuestions,
   sessionCount,
+  sessions,
+  speakers,
   type QA,
 } from "../eval/locomo/adapter.ts";
 import { LlmClient } from "../eval/locomo/llm.ts";
-import { ANSWER_SYSTEM, JUDGE_SYSTEM, answerUser, isCorrect, judgeUser } from "../eval/locomo/prompts.ts";
+import { ANSWER_SYSTEM, INGEST_SYSTEM, JUDGE_SYSTEM, answerUser, ingestUser, isCorrect, judgeUser } from "../eval/locomo/prompts.ts";
 
 // ---------- CLI ----------
 function arg(name: string): string | undefined {
@@ -41,6 +44,10 @@ const SAMPLE = Number(arg("sample") ?? "0");
 const SEED = Number(arg("seed") ?? "1");
 const CONV = arg("conv");
 const WITH_ANSWER = flag("answer");
+// 建树：默认机械映射；--llm-ingest 显式开启；--answer 默认含 LLM 建树（--raw-ingest 可退回机械）
+const LLM_INGEST = flag("llm-ingest") || (WITH_ANSWER && !flag("raw-ingest"));
+// 推理模型（如 deepseek-v4-1-flash）的 reasoning 会吃掉预算，太小会导致 content 为空
+const INGEST_MAX_TOKENS = Number(arg("ingest-max-tokens") ?? "8000");
 
 const RUN_DIR = resolve("eval/locomo/runs", new Date().toISOString().replace(/[:.]/g, "-"));
 
@@ -65,8 +72,8 @@ async function main(): Promise<void> {
     console.log(`分层抽样 ${sel.total} 题（seed=${SEED}）→ ${d}`);
   }
 
-  const llm = WITH_ANSWER ? LlmClient.fromEnv(arg("model")) : null;
-  if (llm) console.log(`LLM：${llm.model}`);
+  const llm = WITH_ANSWER || LLM_INGEST ? LlmClient.fromEnv(arg("model")) : null;
+  if (llm) console.log(`LLM：${llm.model}${LLM_INGEST ? "（含建树 ingest）" : ""}`);
 
   await mkdir(RUN_DIR, { recursive: true });
   const rows: Row[] = [];
@@ -86,21 +93,35 @@ async function main(): Promise<void> {
     }
   };
 
-  console.log(`共 ${total} 题 · topK=${TOP_K}${llm ? " · 端到端" : " · 仅检索"}`);
+  console.log(`共 ${total} 题 · topK=${TOP_K}${WITH_ANSWER ? " · 端到端" : " · 仅检索"}`);
   for (const c of convs) {
     const qas: QA[] = sel.byConv.get(c.sample_id) ?? [];
     if (qas.length === 0) continue;
     if (isTty && done > 0) process.stdout.write("\n");
-    console.log(`▶ ${c.sample_id}：${sessionCount(c.conversation)} sessions · ${qas.length} 题${llm ? "（含 LLM 问答）" : "（仅检索）"}`);
+    const mode = !llm ? "仅检索" : LLM_INGEST ? (WITH_ANSWER ? "LLM 建树 + 问答" : "LLM 建树") : "机械建树 + LLM 问答";
+    console.log(`▶ ${c.sample_id}：${sessionCount(c.conversation)} sessions · ${qas.length} 题（${mode}）`);
     const mf = await MemoryFile.open(join(RUN_DIR, c.sample_id));
-    await mf.applyTree(buildOutline(c)); // 一次成型：session 节点 + 轮次叶子
+    await mf.applyTree(buildOutline(c)); // 骨架：session 节点 + 轮次叶子
+    if (llm && LLM_INGEST) {
+      const all = sessions(c);
+      const [a, b] = speakers(c);
+      for (let i = 0; i < all.length; i++) {
+        const s = all[i]!;
+        const extracted = sanitizeOutline(await llm.chat(INGEST_SYSTEM, ingestUser(a, b, s.date, s.turns), INGEST_MAX_TOKENS));
+        // 保留 session 日期叶子（时间题需要），再接 LLM 抽取的事实/主题
+        const frag = [s.date ? `- [date] ${s.date}` : "", extracted].filter(Boolean).join("\n");
+        if (frag) await mf.applyOutline(`session-${s.index}`, frag);
+        if (isTty) process.stdout.write(`\r  整理记忆 session ${i + 1}/${all.length} …`.padEnd(90));
+      }
+      if (isTty) process.stdout.write("\n");
+    }
 
     for (const q of qas) {
       const hits = mf.search(q.question, TOP_K);
       const gold = goldSessions(q);
-      const rank = hits.findIndex((h) => gold.has(h.path));
+      const rank = hits.findIndex((h) => [...gold].some((g) => h.path === g || h.path.startsWith(`${g}/`)));
       const row: Row = { conv: c.sample_id, q: q.question, cat: q.category, rank };
-      if (llm && EVAL_CATEGORIES.has(q.category)) {
+      if (WITH_ANSWER && llm && EVAL_CATEGORIES.has(q.category)) {
         const memories = hits.filter((h) => h.path).map((h) => mf.renderSection(h.path) ?? "").join("\n\n---\n\n");
         row.pred = (await llm.chat(ANSWER_SYSTEM, answerUser(memories, q.question))).trim();
         const verdict = await llm.chat(JUDGE_SYSTEM, judgeUser(q.question, q.answer, row.pred));

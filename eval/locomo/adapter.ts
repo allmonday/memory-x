@@ -76,6 +76,57 @@ export function sessionCount(conv: Record<string, unknown>): number {
   return Object.keys(conv).filter((k) => /^session_\d+$/.test(k)).length;
 }
 
+export interface SessionInfo {
+  index: number;
+  date?: string;
+  turns: Turn[];
+}
+
+/** 逐 session 展开（供 LLM ingest 逐段整理） */
+export function sessions(c: Conversation): SessionInfo[] {
+  const out: SessionInfo[] = [];
+  for (let s = 1; s <= sessionCount(c.conversation); s++) {
+    const date = c.conversation[`session_${s}_date_time`];
+    out.push({
+      index: s,
+      date: typeof date === "string" ? date : undefined,
+      turns: (c.conversation[`session_${s}`] as Turn[] | undefined) ?? [],
+    });
+  }
+  return out;
+}
+
+export function speakers(c: Conversation): [string, string] {
+  return [String(c.conversation.speaker_a ?? "A"), String(c.conversation.speaker_b ?? "B")];
+}
+
+/**
+ * 把 LLM 输出规整成 parseFragment 能吃的大纲：
+ * 剥代码块/强调，统一列表符号，把标题层级重映射为连续深度（避免「层级跳跃」报错）。
+ */
+export function sanitizeOutline(raw: string): string {
+  const out: string[] = [];
+  const stack: number[] = [];
+  for (const rawLine of raw.replace(/\r/g, "").split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("```")) continue;
+    const h = /^(#{1,6})\s+(.+?)\s*#*$/.exec(line);
+    if (h) {
+      const title = h[2]!.replace(/[*_`]/g, "").replace(/[/\[\]]/g, " ").replace(/\s+/g, " ").trim();
+      if (!title) continue;
+      const lvl = h[1]!.length;
+      while (stack.length && stack[stack.length - 1]! >= lvl) stack.pop();
+      stack.push(lvl);
+      out.push(`${"#".repeat(Math.min(6, 2 + stack.length))} ${title}`);
+      continue;
+    }
+    const b = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(line);
+    const text = (b ? b[1]! : line).replace(/[*_`]/g, "").trim();
+    if (text) out.push(`- ${text}`);
+  }
+  return out.join("\n");
+}
+
 /** 一段对话 → memory-x 大纲（供 MemoryFile.applyTree 一次成型） */
 export function buildOutline(c: Conversation): string {
   const lines: string[] = [];

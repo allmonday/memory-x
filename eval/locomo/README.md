@@ -10,6 +10,8 @@
 | **检索（默认）** | 每题 `search(question, topK)`，看命中的节点是否覆盖 gold 所在的 session。指标 hit@1/3/k、MRR | 零 LLM 调用，秒级 |
 | **端到端（`--answer`）** | 命中节点正文作上下文 → LLM 回答 → LLM 二元判分（业界 J-score，仅类 1-4） | 每题 2 次 LLM 调用 |
 
+建树方式可选（见下）：**机械**（每轮原文一条叶子）或 **LLM ingest**（模型把对话整理成主题+事实）。
+
 LoCoMo-10：10 段多会话对话，共 1986 题；类别 `1 multi-hop / 2 temporal / 3 open-domain / 4 single-hop / 5 adversarial`（5 类不计分）。
 
 ## 适配方式
@@ -21,16 +23,25 @@ LoCoMo-10：10 段多会话对话，共 1986 题；类别 `1 multi-hop / 2 tempo
 ```
 `evidence` 里的 `dia_id`（如 `D3:12`）用于判断是否命中 `session-3`。映射与数据集定位是纯逻辑，见 `adapter.ts`。
 
+## 建树：机械 vs LLM ingest
+
+memory-x 的真实设计里，入树本应由 LLM 整理（M2）。因此：
+
+- **机械建树**（默认，零 LLM）：一段对话 → `session-N` 节点，每轮原文一条叶子。快、廉价，保留全部表层关键词。
+- **LLM 建树**（`--llm-ingest`）：逐个 session 把对话丢给模型，整理成「描述性主题 + 事实」子树（仍挂在 `session-N` 下，保留 `session-N` 锚点与日期叶子）。`--answer` 时**默认开启**，用 `--raw-ingest` 退回机械。
+- `--ingest-max-tokens N`（默认 8000）：推理模型（如 deepseek-v4-1-flash）的 reasoning 会吃掉输出预算，预算不足会导致 content 为空。
+
 ## 用法
 
 ```bash
-npm run eval:locomo                                    # 全量检索（1986 题，~30s，零 LLM）
-npm run eval:locomo -- --sample 200 --answer           # 分层抽 ~200 题做端到端
-npm run eval:locomo -- --conv conv-26 --limit 20       # 单段前 20 题（仅检索）
-npm run eval:locomo -- --sample 200 --answer --topK 5  # 指定 topK
+npm run eval:locomo                                    # 全量检索：机械建树（1986 题，~30s，零 LLM）
+node scripts/locomo.ts --llm-ingest --conv conv-26     # LLM 建树 + 检索
+npm run eval:locomo -- --sample 200 --answer           # 端到端（默认 LLM 建树 + 回答 + 判分）
+node scripts/locomo.ts --sample 200 --answer --raw-ingest   # 端到端（机械建树）
+node scripts/locomo.ts --sample 200 --answer --topK 5  # 指定 topK
 ```
 
-参数：`--data <path>` `--conv <id>` `--limit N` `--sample N` `--seed N` `--topK N` `--answer` `--model <name>`。
+参数：`--data <path>` `--conv <id>` `--limit N` `--sample N` `--seed N` `--topK N` `--answer` `--llm-ingest` `--raw-ingest` `--ingest-max-tokens N` `--model <name>`。
 
 运行时输出**实时进度**：TTY 下原地刷新 `[i/N] xx.x% ✓/✗ conv · 类别`（检索模式用 ○/◐/●）；重定向/非 TTY 时每 25 题打一行。结尾打印检索指标、各类 J-score 与 LLM token 用量。
 
@@ -61,6 +72,16 @@ npm run eval:locomo -- --sample 200 --answer --topK 5  # 指定 topK
 
 评估在自己的沙盒目录里用**真核心代码**重演对话历史，每个记忆仓是独立 SQLite 文件；
 与 `~/memory-x/memory/`（pi 的真实记忆）没有任何交集。唯二共享：核心代码（只读引用）、LLM 网关配额。
+
+## 已知发现（conv-26，199 题，仅检索）
+
+| 建树方式 | hit@1 | hit@3 | hit@5 | MRR |
+|---|---|---|---|---|
+| 机械（每轮原文） | **0.678** | 0.824 | 0.910 | 0.768 |
+| LLM ingest（早期提示词，按人名分组） | 0.487 | — | — | — |
+| LLM ingest（禁人名标题） | 0.538 | 0.774 | 0.824 | 0.658 |
+
+结论：**纯词法检索下，LLM 摘要会掉分**——摘要丢掉表层关键词，且短文档/主题节点偏多会稀释判别力。这说明「LLM 精炼记忆」要真正见效，需要 **语义/向量检索（M5）**，或**混合保留原文**（原文叶子 + 摘要子树）。
 
 ## 提醒
 
