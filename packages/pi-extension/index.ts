@@ -223,22 +223,20 @@ export default function memoryExtension(pi: any): void {
   // ---------- system prompt 注入（P2：只给目录，不给内容） ----------
 
   pi.on("before_agent_start", async (event: any) => {
+    // 稳定段（目录+规则）：内容不变 → pi 差分为空 → 不重发不破缓存
     if (cachedToc === null) {
       const m = await memory();
       cachedToc = tocDigest(m.root, { maxChars: SECTION_MAX_CHARS });
     }
-    const rules = [
-      "你有一棵长期记忆树（markdown 大纲，存储在用户机器上）。目录（[n] = 子树叶子总数）：",
+    event.systemPromptOptions.sections.memory = [
+      "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "使用规则：",
-      "- 需要背景时用 memory_read 按路径下钻，不要凭空猜测记忆内容",
-      "- 不确定信息在哪个节点时先用 memory_search 检索（命中带完整链路）",
-      "- 对话中出现跨会话有价值的结论/决策/实体关系/长期待办时，用 memory_upsert 主动记录（一条一事，带日期标注）",
-      "- 结构性重构（新增子树、整理分支）用 memory_apply_outline，零散增补用 memory_upsert",
-      "- 不确定路径时先读目录或用更浅路径试探，避免盲写",
-    ];
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；重构用 memory_apply_outline；勿猜路径。",
+    ].join("\n");
 
-    // 自动召回：用户输入 → 检索 top-3（分数闸门过滤）→ 追加「相关记忆」段
+    // 召回段（独立 section）：每轮随 prompt 变化，但只重发这小块，不动大段。
+    // 命中集不变 → 字符串相同 → 差分为空 → 零成本。
+    let recallBody: string | null = null;
     if (event.messageType === "user" && typeof event.prompt === "string" && event.prompt.length >= 2) {
       try {
         const m = await memory();
@@ -248,19 +246,17 @@ export default function memoryExtension(pi: any): void {
             const chain = [...h.ancestors, h.title].join(" › ");
             return `- ${chain}：${h.snippet.slice(0, 60)}`;
           });
-          rules.push(
-            "",
-            "以下是与本次输入自动召回的相关记忆（确认可用；需要全文用 memory_read）：",
-            ...lines,
-          );
+          recallBody = ["相关记忆（自动召回，需全文用 memory_read）：", ...lines].join("\n");
         }
       } catch {
         // 召回失败不阻断会话
       }
     }
-
-    // sections: Record<string, string>，渲染为 <memory>…</memory>（prompt-customizer.ts 同款做法）
-    event.systemPromptOptions.sections.memory = rules.join("\n");
+    if (recallBody !== null) {
+      event.systemPromptOptions.sections.memory_recall = recallBody;
+    } else {
+      delete event.systemPromptOptions.sections.memory_recall;
+    }
   });
 
   // ---------- 命令 ----------
