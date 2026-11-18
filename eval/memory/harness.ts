@@ -15,7 +15,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { MemoryFile } from "../../packages/core/src/index.ts";
 import { LlmClient } from "../llm.ts";
-import { ANSWER_SYSTEM, EXTRACT_SYSTEM, JUDGE_SYSTEM, REFUSE_SYSTEM, answerUser, extractUser, judgeUser, refuseUser } from "./prompts.ts";
+import { ANSWER_SYSTEM, EXTRACT_SYSTEM, JUDGE_SYSTEM, REFUSE_SYSTEM, UPDATE_SYSTEM, answerUser, extractUser, judgeUser, refuseUser, updateUser } from "./prompts.ts";
 
 export interface Observation {
   id?: string;
@@ -80,8 +80,35 @@ function allLeaves(mf: MemoryFile): string[] {
   return out;
 }
 
-// ---------- 写入（两种建树方式） ----------
-async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: "llm" | "mechanical"): Promise<void> {
+// ---------- 写入（机械 / LLM 抽取 / LLM 更新感知） ----------
+type IngestMode = "mechanical" | "llm" | "llm-update";
+
+/** 当前记忆展平成 `[路径] 叶子` 行（供更新感知的写入提示） */
+function memoryLines(mf: MemoryFile): string {
+  const out: string[] = [];
+  const walk = (n: any, path: string) => {
+    for (const l of n.leaves) out.push(`[${path}] ${l}`);
+    for (const c of n.children) walk(c, path ? `${path}/${c.title}` : c.title);
+  };
+  walk(mf.root, "");
+  return out.join("\n");
+}
+
+async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: IngestMode): Promise<void> {
+  if (mode === "llm-update" && llm) {
+    for (let i = 0; i < s.observations.length; i++) {
+      const o = s.observations[i]!;
+      const raw = await llm.chat(UPDATE_SYSTEM, updateUser(memoryLines(mf), o.date, o.text), 8000);
+      for (const line of raw.split("\n")) {
+        const t = line.trim();
+        const u = /^UPDATE\b/i.test(t) ? t.replace(/^UPDATE\s*/i, "").split("|").map((x) => x.trim()) : null;
+        const a = !u && /^ADD\b/i.test(t) ? t.replace(/^ADD\s*/i, "").split("|").map((x) => x.trim()) : null;
+        if (u && u.length >= 3 && u[0] && u[1] && u[2]) await mf.updateNode(u[0], u[1], u.slice(2).join(" | "));
+        else if (a && a.length >= 2 && a[0] && a[1]) await mf.upsertNode(a[0], a.slice(1).join(" | "));
+      }
+    }
+    return;
+  }
   if (mode === "llm" && llm) {
     for (let i = 0; i < s.observations.length; i++) {
       const o = s.observations[i]!;
@@ -125,7 +152,7 @@ export interface Result {
   details: string[];
 }
 
-export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClient | null; mode: "llm" | "mechanical" }): Promise<Result> {
+export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClient | null; mode: IngestMode }): Promise<Result> {
   await mkdir(opts.dir, { recursive: true });
   const mf = await MemoryFile.open(opts.dir);
   await ingest(mf, s, opts.llm, opts.mode);

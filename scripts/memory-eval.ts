@@ -19,7 +19,7 @@ function arg(name: string): string | undefined {
 }
 
 const file = resolve(arg("file") ?? "eval/memory/scenarios.example.json");
-const mode = (arg("mode") ?? "llm") as "llm" | "mechanical";
+const mode = (arg("mode") ?? "llm") as "llm" | "mechanical" | "llm-update";
 const filter = arg("filter");
 const RUN_DIR = resolve("eval/memory/runs", new Date().toISOString().replace(/[:.]/g, "-"));
 
@@ -27,8 +27,9 @@ const all = JSON.parse(await readFile(file, "utf8")) as Scenario[];
 const scenarios = filter ? all.filter((s) => s.id === filter) : all;
 if (scenarios.length === 0) throw new Error(`没有匹配的场景（file=${file}, filter=${filter ?? "-"}）`);
 
-const llm = mode === "llm" ? LlmClient.fromEnv(arg("model")) : null;
-console.log(`场景文件：${file}\n模式：${mode === "llm" ? "LLM 抽取" : "机械建树"} · 场景数 ${scenarios.length}${llm ? ` · 模型 ${llm.model}` : ""}\n`);
+const llm = mode === "mechanical" ? null : LlmClient.fromEnv(arg("model"));
+const MODE_LABEL = mode === "llm-update" ? "LLM 更新感知" : mode === "llm" ? "LLM 抽取" : "机械建树";
+console.log(`场景文件：${file}\n模式：${MODE_LABEL} · 场景数 ${scenarios.length}${llm ? ` · 模型 ${llm.model}` : ""}\n`);
 
 await mkdir(RUN_DIR, { recursive: true });
 const results: Result[] = [];

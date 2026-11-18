@@ -42,7 +42,7 @@ let tidyDraft: { outline: string; createdAt: string } | null = null;
 /** 整理作用域：null=整棵树（全局），否则为目标节点路径（局部整理） */
 let tidyScope: string | null = null;
 
-const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_write_note", "memory_move", "memory_delete", "memory_apply_outline"]);
+const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_update", "memory_write_note", "memory_move", "memory_delete", "memory_apply_outline"]);
 
 /** 整理模式下拦截写工具：方案只能走 memory_propose 草稿，确认后才落盘 */
 function gateTidyWrites(pi: any): void {
@@ -205,6 +205,37 @@ export default function memoryExtension(pi: any): void {
           ? `已写入 ${r.path}（版本 #${r.revision}，可用 /memory rollback 回滚）${hints.length ? "\n⚠️ " + hints.join("；") : ""}`
           : `已存在，无需写入：${r.path}`,
       );
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_update",
+    label: "更新记忆",
+    description:
+      "原地替换某节点内的一条叶子事实（supersede/更新）。match = 要被替换的旧叶子原文，必须在该节点内**精确且唯一**命中，否则不做任何改动。用于「阶段性变化」：状态/计划/偏好变了、或旧结论被推翻。旧值被替换后即从检索中消失（变更落 revisions 可回滚）。",
+    promptSnippet: "替换一条过时的记忆",
+    promptGuidelines: [
+      "Use memory_update when new information SUPERSEDES an existing leaf (state changed / plan updated / fact corrected) instead of adding a duplicate. `match` must be the exact old leaf text; read the node first (memory_read) to copy it verbatim. If it is not unique in the node, nothing changes.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        path: pathParam,
+        match: { type: "string", description: "要被替换的旧叶子原文（在该节点内需唯一命中）" },
+        leaf: { type: "string", description: "新的叶子文本（可带 ← 日期）" },
+      },
+      required: ["path", "match", "leaf"],
+    },
+    async execute(_toolCallId: string, params: { path: string; match: string; leaf: string }) {
+      const m = await memory();
+      const r = await m.updateNode(params.path, params.match, params.leaf);
+      if (!r.ok) {
+        return text(
+          `未替换：在「${params.path}」内未唯一命中旧原文（或路径不存在）。先用 memory_read 查看该节点、逐字复制要替换的叶子。`,
+        );
+      }
+      if (r.changed) invalidateToc();
+      return text(r.changed ? `已替换 ${r.path}（版本 #${r.revision}）` : `新旧相同，无需替换：${r.path}`);
     },
   });
 
@@ -415,7 +446,7 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；长正文（超一条叶子）用 memory_write_note 写成 Markdown；重构用 memory_apply_outline；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；重构用 memory_apply_outline；勿猜路径。",
     ].join("\n");
 
     // 召回段（独立 section）：每轮随 prompt 变化，但只重发这小块，不动大段。
