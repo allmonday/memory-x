@@ -38,6 +38,11 @@ test("UI server：页面与各 API 端点", async () => {
   assert.ok(typeof diff.added === "number");
   assert.match(diff.diff, /体检|生活|健康/);
 
+  const changes = (await (await fetch(`${url}/api/changes?revisionId=2`)).json()).changes;
+  assert.ok(changes.length > 0);
+  assert.ok(changes.every((c: any) => c.revisionId === 2 && c.revOp === "upsert"));
+  assert.ok(changes.some((c: any) => c.op === "add" && c.toText.includes("体检")));
+
   const lint = (await (await fetch(`${url}/api/lint`)).json()).issues;
   assert.ok(Array.isArray(lint));
 

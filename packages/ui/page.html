@@ -89,6 +89,14 @@
              border-radius: 8px; padding: 12px; overflow: auto; white-space: pre-wrap; }
   pre.diff .a { color: var(--add); background: var(--add-bg); display: block; }
   pre.diff .d { color: var(--del); background: var(--del-bg); display: block; }
+  .rev-changes { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 10px 12px; margin-bottom: 8px; }
+  .rev-changes .rc-hint { font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+  .rev-changes .rc-hint code { background: #f1f0ef; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  ul.rc-list { list-style: none; margin: 0; padding: 0; font: 12.5px/1.7 ui-monospace, monospace; }
+  ul.rc-list li { padding: 1px 0 1px 10px; border-left: 2px solid var(--border); }
+  ul.rc-list li.rc-add, ul.rc-list li.rc-add-node { border-left-color: var(--add); color: var(--add); }
+  ul.rc-list li.rc-remove, ul.rc-list li.rc-remove-node { border-left-color: var(--del); color: var(--del); }
   .issue { padding: 8px 12px; border-left: 3px solid var(--info); background: var(--panel);
            border-radius: 0 8px 8px 0; margin-bottom: 8px; }
   .issue.warn { border-left-color: var(--warn); }
@@ -430,12 +438,29 @@ async function showHistory() {
   $("#v-history").querySelectorAll(".rev-item").forEach((el) => {
     el.onclick = async () => {
       const wasOpen = el.classList.contains("open");
-      // 先收起当前已展开的 diff（diff 是 .rev-item 的兄弟节点，用 pre.diff 选择）
-      $("#v-history").querySelectorAll("pre.diff").forEach((x) => x.remove());
+      // 收起已展开的变更块 / diff（都是 .rev-item 的兄弟节点）
+      $("#v-history").querySelectorAll(".rev-changes, pre.diff").forEach((x) => x.remove());
       $("#v-history").querySelectorAll(".rev-item.open").forEach((x) => x.classList.remove("open"));
       if (wasOpen) return; // 再次点击同一项 → 收起
       el.classList.add("open");
-      const d = await api(`/api/revisions/diff?id=${el.dataset.id}`);
+      const id = Number(el.dataset.id);
+
+      // 结构化变更（undo log 派生）：该版本改了什么
+      const { changes } = await api(`/api/changes?revisionId=${id}`);
+      const known = new Set(["add", "remove", "add-node", "remove-node", "rename", "move", "note-content", "note-summary"]);
+      const label = (c) =>
+        `${c.op} ${esc(c.path)}${c.toText ? ` → ${esc(String(c.toText).slice(0, 90))}` : c.fromText ? ` ← ${esc(String(c.fromText).slice(0, 90))}` : ""}`;
+      const block = document.createElement("div");
+      block.className = "rev-changes";
+      block.innerHTML =
+        `<div class="rc-hint">回滚到本版本之前：<code>/memory rollback ${Math.max(1, id - 1)}</code></div>` +
+        (changes.length
+          ? `<ul class="rc-list">${changes.map((c) => `<li class="${known.has(c.op) ? `rc-${c.op}` : ""}">${label(c)}</li>`).join("")}</ul>`
+          : `<div class="empty">该版本无结构变更</div>`);
+      el.after(block);
+
+      // 附加 Markdown 行级 diff（人读；深树可能不完整）
+      const d = await api(`/api/revisions/diff?id=${id}`);
       const box = document.createElement("pre");
       box.className = "diff";
       box.innerHTML = esc(d.diff).split("\n").map((line) => {
@@ -443,7 +468,7 @@ async function showHistory() {
         if (line.startsWith("- ")) return `<span class="d">${line}</span>`;
         return line;
       }).join("\n");
-      el.after(box);
+      block.after(box);
     };
   });
 }

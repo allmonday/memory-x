@@ -80,6 +80,12 @@ export async function startUiServer(mfFactory: () => Promise<MemoryFile>, opts: 
       if (url.pathname === "/api/revisions") {
         return json(res, 200, { revisions: mf.listRevisions(Number(url.searchParams.get("limit") ?? 100)) });
       }
+      if (url.pathname === "/api/changes") {
+        const revId = url.searchParams.get("revisionId");
+        const limit = Number(url.searchParams.get("limit") ?? 200);
+        const changes = mf.listChanges(revId ? { revisionId: Number(revId), limit } : { limit });
+        return json(res, 200, { changes });
+      }
       if (url.pathname === "/api/revisions/diff") {
         const id = Number(url.searchParams.get("id"));
         const store = MemoryStore.open(mf.dir);
