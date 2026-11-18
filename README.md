@@ -92,7 +92,7 @@ npm run eval          # 检索质量评估（hit@1/@3/MRR；当前 0.73，题集
 npm run crash-verify  # 写入中 SIGKILL，验证 db 完好（WAL）
 ```
 
-零运行时依赖（Node ≥ 22.19，`node:sqlite` + strip-types 直跑 TS）。
+零运行时依赖（**Node ≥ 23.6**，`node:sqlite` + 原生 TS 直跑；无需 npm install、无需系统 SQLite、运行时不碰 git）。
 
 ## 路线图
 

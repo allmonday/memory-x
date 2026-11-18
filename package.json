@@ -10,5 +10,8 @@
     "crash-verify": "node scripts/crash-verify.ts",
     "eval": "node scripts/eval.ts",
     "ui": "node scripts/ui.ts"
+  },
+  "engines": {
+    "node": ">=23.6"
   }
 }
