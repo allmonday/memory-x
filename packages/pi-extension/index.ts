@@ -49,7 +49,7 @@ let tidyDraft: { outline: string; createdAt: string } | null = null;
 /** 整理作用域：null=整棵树（全局），否则为目标节点路径（局部整理） */
 let tidyScope: string | null = null;
 
-const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_update", "memory_write_note", "memory_move", "memory_delete", "memory_apply_outline"]);
+const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_update", "memory_write_note", "memory_summary", "memory_move", "memory_delete", "memory_apply_outline"]);
 
 /** 整理模式下拦截写工具：方案只能走 memory_propose 草稿，确认后才落盘 */
 function gateTidyWrites(pi: any): void {
@@ -174,10 +174,12 @@ export default function memoryExtension(pi: any): void {
         const tops = m.root.children.map((c) => c.title).join("、") || "（空）";
         return text(`路径不存在：${params.path}\n当前顶层节点：${tops}`);
       }
+      const summary = m.getSummary(params.path);
+      const head = summary ? `> 摘要：${summary}\n\n` : "";
       if (md.length > READ_MAX_CHARS) {
-        return text(`${md.slice(0, READ_MAX_CHARS)}\n…（已截断，请用更深的路径分段读取）`);
+        return text(`${head}${md.slice(0, READ_MAX_CHARS)}\n…（已截断，请用更深的路径分段读取）`);
       }
-      return text(md);
+      return text(head + md);
     },
   });
 
@@ -280,6 +282,40 @@ export default function memoryExtension(pi: any): void {
   });
 
   pi.registerTool({
+    name: "memory_summary",
+    label: "写节点摘要",
+    description:
+      "写入/刷新节点的「摘要」（L0 一行，用于目录导航；不是事实，事实仍放叶子/content）。省略 text 时只回显当前有效摘要；text 传空串则清除显式摘要（回退自动推导）。",
+    promptSnippet: "写节点摘要（导航用一行）",
+    promptGuidelines: [
+      "Use memory_summary to give a node a concise one-line description so the TOC is scannable without reading the whole node. It is navigation only, not a fact.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        path: pathParam,
+        text: { type: "string", description: "摘要文本（一行，≤~120 字）；省略则只读取当前摘要" },
+      },
+      required: ["path"],
+    },
+    async execute(_toolCallId: string, params: { path: string; text?: string }) {
+      const m = await memory();
+      if (params.text === undefined) {
+        return text(`${params.path} 摘要：${m.getSummary(params.path) || "（无）"}`);
+      }
+      const r = await m.writeSummary(params.path, params.text);
+      if (r.changed) invalidateToc();
+      return text(
+        r.ok
+          ? r.changed
+            ? `已写入 ${r.path} 的摘要（版本 #${r.revision}）`
+            : `摘要无变化：${params.path}`
+          : `路径不存在：${params.path}（先用 memory_read 确认路径）`,
+      );
+    },
+  });
+
+  pi.registerTool({
     name: "memory_move",
     label: "移动记忆",
     description: "把子树移动到目标节点之下",
@@ -355,7 +391,7 @@ export default function memoryExtension(pi: any): void {
         const meta = [h.hasContent ? "有完整信息" : null, h.leafCount > 0 ? `${h.leafCount} 条事实` : null]
           .filter(Boolean)
           .join("，");
-        return `${i + 1}. ${chain}${meta ? `（${meta}）` : ""}\n   ${h.snippet}`;
+        return `${i + 1}. ${chain}${meta ? `（${meta}）` : ""}\n   ${h.summary ? `${h.summary}\n   ` : ""}${h.snippet}`;
       });
       return text(`命中 ${hits.length} 条：\n${lines.join("\n")}\n（取全文：memory_read 对应路径）`);
     },
@@ -457,7 +493,7 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；重构用 memory_apply_outline；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；重构用 memory_apply_outline；勿猜路径。",
       `写入规范：${WRITE_STYLE}`,
     ].join("\n");
 

@@ -5,6 +5,10 @@ export interface MemoryNode {
   leaves: string[];
   /** 节点完整信息（RAG 语料）。导出为 fenced block；内容不得含 ``` 行 */
   content?: string | null;
+  /** 节点级摘要（L0，一行，导航用）。显式写入；缺省/陈旧时用确定性推导兜底 */
+  summary?: string | null;
+  /** 生成 summary 时的内容指纹（summaryHash(node)）；用于陈旧检测 */
+  summaryHash?: string | null;
   children: MemoryNode[];
 }
 

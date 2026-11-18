@@ -12,7 +12,7 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MemoryFile, diffLines, diffStats, formatDiff, lintTree } from "../core/src/index.ts";
+import { MemoryFile, diffLines, diffStats, effectiveSummary, formatDiff, lintTree } from "../core/src/index.ts";
 import { serializeMarkdown } from "../core/src/serializer.ts";
 import { MemoryStore } from "../core/src/store.ts";
 import type { MemoryNode } from "../core/src/types.ts";
@@ -33,6 +33,7 @@ export interface UiServer {
 interface NodeJson {
   title: string;
   path: string;
+  summary: string;
   leafTotal: number;
   leafCount: number;
   hasContent: boolean;
@@ -114,6 +115,7 @@ function toJson(root: MemoryNode): NodeJson[] {
     return {
       title: n.title,
       path,
+      summary: effectiveSummary(n, { childTitles: false }),
       leafTotal: countLeaves(n),
       leafCount: n.leaves.length,
       hasContent: n.content != null,

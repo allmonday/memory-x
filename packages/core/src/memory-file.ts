@@ -6,6 +6,7 @@ import { withDirLock } from "./lock.ts";
 import { deleteNode, moveNode, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
 import { canonicalPathOf, resolvePath, forEachWithPath } from "./path.ts";
+import { effectiveSummary, summaryHash } from "./summary.ts";
 import { serializeSubtree } from "./serializer.ts";
 import { MemoryStore } from "./store.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
@@ -117,9 +118,9 @@ export class MemoryFile {
    * 取规范物化路径（含 [n] 消歧）后交给 store；指向根＝全树；解析不到时返回空。
    */
   search(query: string, topK?: number, scope?: string) {
+    this.reloadIfStale();
     let canonical: string | undefined;
     if (scope && scope.trim() !== "") {
-      this.reloadIfStale();
       const r = resolvePath(this.root, scope, { fuzzy: true });
       if (!r) return [];
       if (r.node === this.root) {
@@ -131,7 +132,14 @@ export class MemoryFile {
       }
     }
     const hits = this.store.search(query, topK, canonical);
-    if (hits.length > 0) this.store.recordAccess(hits.map((h) => h.path));
+    if (hits.length > 0) {
+      // 附上有效摘要（显式且未陈旧 → 用它；否则推导），供展示
+      for (const h of hits) {
+        const r = resolvePath(this.root, h.path);
+        h.summary = r ? effectiveSummary(r.node) : "";
+      }
+      this.store.recordAccess(hits.map((h) => h.path));
+    }
     return hits;
   }
 
@@ -143,6 +151,31 @@ export class MemoryFile {
   /** 节点完整信息（content）。 */
   readNote(path: string): string | null {
     return this.readSection(path)?.node.content ?? null;
+  }
+
+  /** 节点有效摘要（显式且未陈旧 → 用它；否则确定性推导）。 */
+  getSummary(path: string): string {
+    const r = this.readSection(path);
+    return r ? effectiveSummary(r.node) : "";
+  }
+
+  /**
+   * 写节点摘要（L0，导航用）。text 为空串则清除显式摘要（回退推导摘要）。
+   * 写入时记录内容指纹，叶子/子节点变动后 hash 不符即视为陈旧。
+   */
+  async writeSummary(path: string, text: string): Promise<OpResult> {
+    return this.mutate("summary", path, (root) => {
+      const r = resolvePath(root, path, { fuzzy: true });
+      if (!r) return { ok: false, changed: false, path };
+      const next = text.trim() === "" ? null : text.trim();
+      const hash = next == null ? null : summaryHash(r.node);
+      if (r.node.summary === next && (r.node.summaryHash ?? null) === hash) {
+        return { changed: false, path };
+      }
+      r.node.summary = next;
+      r.node.summaryHash = hash;
+      return { changed: true, path };
+    });
   }
 
   /** 写节点完整信息（RAG 语料，Markdown）。可含围栏代码块（序列化用动态围栏，不冲突）。 */
@@ -211,15 +244,21 @@ export class MemoryFile {
       throw new Error("整树方案过大（>3000 条目）");
     }
     return this.mutate("tidy", "(整树)", (root) => {
-      // content（fenced RAG 语料）不在 outline 中表达：按物化路径把旧树 content 迁回同路径节点。
-      // 改名/合并/移动导致路径变化的节点，content 无法自动映射（会丢失）；同路径节点完整保留。
-      const savedContent = new Map<string, string>();
+      // content/summary 不在 outline 中表达：按物化路径把旧树的值迁回同路径节点。
+      // 改名/合并/移动导致路径变化的节点，无法自动映射（会丢失）；同路径节点完整保留。
+      const savedContent = new Map<string, { content: string | null; summary: string | null; summaryHash: string | null }>();
       forEachWithPath(root.children, "", (node, path) => {
-        if (node.content != null) savedContent.set(path, node.content);
+        if (node.content != null || node.summary != null) {
+          savedContent.set(path, { content: node.content ?? null, summary: node.summary ?? null, summaryHash: node.summaryHash ?? null });
+        }
       });
       forEachWithPath(frag.children, "", (node, path) => {
         const keep = savedContent.get(path);
-        if (keep != null) node.content = keep;
+        if (keep) {
+          node.content = keep.content;
+          node.summary = keep.summary;
+          node.summaryHash = keep.summaryHash;
+        }
       });
       root.children = frag.children;
       return { changed: true, path: "(整树)" };
@@ -241,6 +280,8 @@ export class MemoryFile {
       root.title = tree.title;
       root.leaves = tree.leaves;
       root.content = tree.content;
+      root.summary = tree.summary;
+      root.summaryHash = tree.summaryHash;
       root.children = tree.children;
       return { changed: true, path: `#${id}` };
     });

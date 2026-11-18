@@ -108,15 +108,21 @@ export function applyOutline(
   const before = serializeSubtree(current);
   // content（fenced RAG 语料）不经 outline 表达：按物化路径把旧子树 content 迁回同路径节点。
   // 改名/合并/移动导致路径变化的节点无法映射（会丢失）——与 applyTree 行为一致。
-  const savedContent = new Map<string, string>();
+  const savedContent = new Map<string, { content: string | null; summary: string | null; summaryHash: string | null }>();
   forEachWithPath(current.children, "", (node, p) => {
-    if (node.content != null) savedContent.set(p, node.content);
+    if (node.content != null || node.summary != null) {
+      savedContent.set(p, { content: node.content ?? null, summary: node.summary ?? null, summaryHash: node.summaryHash ?? null });
+    }
   });
   current.leaves = frag.leaves;
   current.children = frag.children;
   forEachWithPath(current.children, "", (node, p) => {
     const keep = savedContent.get(p);
-    if (keep != null) node.content = keep;
+    if (keep) {
+      node.content = keep.content;
+      node.summary = keep.summary;
+      node.summaryHash = keep.summaryHash;
+    }
   });
   const after = serializeSubtree(current);
   return { changed: before !== after, resolvedPath: walked.join("/") };

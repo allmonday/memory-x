@@ -1,10 +1,13 @@
 import type { MemoryNode } from "./types.ts";
+import { effectiveSummary } from "./summary.ts";
 
 export interface TocOptions {
   /** 目录展示的最大层级（默认 3） */
   maxDepth?: number;
   /** 输出字符上限（默认 1200，超出截断） */
   maxChars?: number;
+  /** 是否在标题后附节点级摘要（默认 true） */
+  summaries?: boolean;
 }
 
 /**
@@ -14,6 +17,7 @@ export interface TocOptions {
 export function tocDigest(root: MemoryNode, opts: TocOptions = {}): string {
   const maxDepth = opts.maxDepth ?? 3;
   const maxChars = opts.maxChars ?? 1200;
+  const withSummary = opts.summaries ?? true;
   const lines: string[] = [];
 
   const countLeaves = (n: MemoryNode): number =>
@@ -22,7 +26,10 @@ export function tocDigest(root: MemoryNode, opts: TocOptions = {}): string {
   const walk = (n: MemoryNode, depth: number) => {
     if (depth > maxDepth) return;
     const total = countLeaves(n);
-    lines.push(`${"  ".repeat(depth - 1)}- ${n.title}${total > 0 ? ` [${total}]` : ""}`);
+    // TOC 里关掉「子标题兜底」：子目录本来就会列在下面，重复无益
+    const sum = withSummary ? effectiveSummary(n, { childTitles: false }) : "";
+    const suffix = `${total > 0 ? ` [${total}]` : ""}${sum ? `：${sum}` : ""}`;
+    lines.push(`${"  ".repeat(depth - 1)}- ${n.title}${suffix}`);
     for (const c of n.children) walk(c, depth + 1);
   };
   for (const c of root.children) walk(c, 1);

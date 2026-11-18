@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS nodes(
   path TEXT NOT NULL UNIQUE,
   depth INTEGER NOT NULL,
   content TEXT,
+  summary TEXT,
+  summary_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -71,6 +73,8 @@ interface NodeRow {
   path: string;
   depth: number;
   content: string | null;
+  summary: string | null;
+  summary_hash: string | null;
 }
 
 /** 扁平化后的节点元数据（applyDelta 的 diff 单位） */
@@ -78,6 +82,8 @@ interface FlatNode {
   title: string;
   leaves: string[];
   content: string | null;
+  summary: string | null;
+  summaryHash: string | null;
   parentPath: string | null;
   ord: number;
   depth: number;
@@ -108,6 +114,8 @@ export interface SearchHit {
   via: "fts" | "like";
   /** 综合分（合入检索分 + 访问/新鲜度加成），越高越前 */
   score: number;
+  /** 节点级有效摘要（由 MemoryFile.search 填充；store 直接调用时为空串） */
+  summary: string;
 }
 
 /**
@@ -129,6 +137,15 @@ export class MemoryStore {
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** 轻量迁移：旧库（无 summary 列）补列。CREATE TABLE IF NOT EXISTS 不会给已存在的表加列。 */
+  private migrate(): void {
+    const cols = this.db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string }>;
+    const have = new Set(cols.map((c) => c.name));
+    if (!have.has("summary")) this.db.exec("ALTER TABLE nodes ADD COLUMN summary TEXT");
+    if (!have.has("summary_hash")) this.db.exec("ALTER TABLE nodes ADD COLUMN summary_hash TEXT");
   }
 
   static open(dir: string): MemoryStore {
@@ -143,7 +160,7 @@ export class MemoryStore {
 
   loadTree(): MemoryNode {
     const nodeRows = this.db
-      .prepare("SELECT id, parent_id, ord, title, path, depth, content FROM nodes ORDER BY depth, ord, id")
+      .prepare("SELECT id, parent_id, ord, title, path, depth, content, summary, summary_hash FROM nodes ORDER BY depth, ord, id")
       .all() as NodeRow[];
     if (nodeRows.length === 0) return { title: "Memory", leaves: [], children: [] };
 
@@ -157,6 +174,8 @@ export class MemoryStore {
         title: r.title,
         leaves: [],
         content: r.content,
+        summary: r.summary,
+        summaryHash: r.summary_hash,
         children: [],
         __id: r.id,
         __parent: r.parent_id,
@@ -180,6 +199,8 @@ export class MemoryStore {
       title: n.title,
       leaves: n.leaves,
       content: n.content,
+      summary: n.summary,
+      summaryHash: n.summaryHash,
       children: n.children.map(clean),
     });
     return clean(root);
@@ -188,7 +209,7 @@ export class MemoryStore {
   /** 整树重写（单事务）。path 物化：重名兄弟追加 [k]（k≥2）。 */
   saveTree(root: MemoryNode): void {
     const insertNode = this.db.prepare(
-      "INSERT INTO nodes(parent_id, ord, title, path, depth, content) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO nodes(parent_id, ord, title, path, depth, content, summary, summary_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
     const insertLeaf = this.db.prepare("INSERT INTO leaves(node_id, ord, text) VALUES (?, ?, ?)");
 
@@ -205,7 +226,7 @@ export class MemoryStore {
           titleCount.set(child.title, seen);
           const seg = seen > 1 ? `${child.title}[${seen}]` : child.title;
           const path = parentPath === "" ? seg : `${parentPath}/${seg}`;
-          const info = insertNode.run(parentId, ord++, child.title, path, depth, child.content ?? null);
+          const info = insertNode.run(parentId, ord++, child.title, path, depth, child.content ?? null, child.summary ?? null, child.summaryHash ?? null);
           const id = Number(info.lastInsertRowid);
           for (let i = 0; i < child.leaves.length; i++) {
             insertLeaf.run(id, i, child.leaves[i]!);
@@ -214,7 +235,7 @@ export class MemoryStore {
         }
         return ord;
       };
-      const rootInfo = insertNode.run(null, 0, root.title, "", 0, root.content ?? null);
+      const rootInfo = insertNode.run(null, 0, root.title, "", 0, root.content ?? null, root.summary ?? null, root.summaryHash ?? null);
       const rootId = Number(rootInfo.lastInsertRowid);
       for (let i = 0; i < root.leaves.length; i++) {
         insertLeaf.run(rootId, i, root.leaves[i]!);
@@ -245,6 +266,8 @@ export class MemoryStore {
         !o ||
         o.title !== v.title ||
         o.content !== v.content ||
+        o.summary !== v.summary ||
+        o.summaryHash !== v.summaryHash ||
         o.parentPath !== v.parentPath ||
         o.ord !== v.ord ||
         !arrEq(o.leaves, v.leaves)
@@ -255,11 +278,13 @@ export class MemoryStore {
 
     const delNode = this.db.prepare("DELETE FROM nodes WHERE path = ?");
     const upsertRow = this.db.prepare(
-      `INSERT INTO nodes(parent_id, ord, title, path, depth, content)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO nodes(parent_id, ord, title, path, depth, content, summary, summary_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(path) DO UPDATE SET
          parent_id = excluded.parent_id, ord = excluded.ord, title = excluded.title,
-         depth = excluded.depth, content = excluded.content, updated_at = datetime('now')`,
+         depth = excluded.depth, content = excluded.content,
+         summary = excluded.summary, summary_hash = excluded.summary_hash,
+         updated_at = datetime('now')`,
     );
     const idOf = this.db.prepare("SELECT id FROM nodes WHERE path = ?");
     const delLeaves = this.db.prepare("DELETE FROM leaves WHERE node_id = ?");
@@ -275,7 +300,7 @@ export class MemoryStore {
           v.parentPath === null
             ? null
             : ((idOf.get(v.parentPath) as { id: number } | undefined)?.id ?? null);
-        upsertRow.run(parentId, v.ord, v.title, p, v.depth, v.content);
+        upsertRow.run(parentId, v.ord, v.title, p, v.depth, v.content, v.summary, v.summaryHash);
         const nodeId = (idOf.get(p) as { id: number }).id;
         delLeaves.run(nodeId);
         for (let i = 0; i < v.leaves.length; i++) insLeaf.run(nodeId, i, v.leaves[i]!);
@@ -295,6 +320,8 @@ export class MemoryStore {
         title: node.title,
         leaves: node.leaves,
         content: node.content ?? null,
+        summary: node.summary ?? null,
+        summaryHash: node.summaryHash ?? null,
         parentPath,
         ord,
         depth,
@@ -501,6 +528,7 @@ export class MemoryStore {
       leafCount,
       via: h.via,
       score: h.score ?? 0,
+      summary: "",
     };
   }
 

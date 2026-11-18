@@ -2,6 +2,7 @@ export { MemoryFile, MEMORY_FILE } from "./memory-file.ts";
 export { parseMarkdown, ParseError, ROOT_TITLE, MAX_DEPTH } from "./parser.ts";
 export { serializeMarkdown, serializeSubtree, serializeOutline } from "./serializer.ts";
 export { tocDigest, dumpTree, type TocOptions, type DumpOptions } from "./digest.ts";
+export { deriveSummary, effectiveSummary, summaryHash, SUMMARY_MAX_CHARS, type SummaryOptions } from "./summary.ts";
 export { parseFragment, applyOutline } from "./fragment.ts";
 export { withDirLock } from "./lock.ts";
 export { diffLines, diffStats, formatDiff, type DiffLine } from "./diff.ts";
