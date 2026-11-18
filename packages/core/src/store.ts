@@ -213,7 +213,17 @@ export class MemoryStore {
    */
   search(query: string, topK = 5): SearchHit[] {
     const tokens = query.match(/[\p{L}\p{N}]+/gu) ?? [];
-    const ftsTerms = tokens.filter((t) => t.length >= 3).map((t) => `"${t.replace(/"/g, "")}"`);
+    // CJK 长词滑窗拆分：整句子串匹配召回过低（"我最喜欢的科学家是谁" 匹配不到含"科学家"的文档）。
+    // 拆成重叠 trigram OR 连接，bm25 排序压制噪音。
+    const expand = (t: string): string[] => {
+      if (t.length >= 4 && /\p{Script=Han}/u.test(t)) {
+        const out: string[] = [];
+        for (let i = 0; i + 3 <= t.length; i++) out.push(`"${t.slice(i, i + 3)}"`);
+        return out;
+      }
+      return t.length >= 3 ? [`"${t.replace(/"/g, "")}"`] : [];
+    };
+    const ftsTerms = tokens.flatMap(expand);
     const shortTerms = tokens.filter((t) => t.length === 2).map((t) => t.replace(/[\\%_]/g, " "));
     if (ftsTerms.length === 0 && shortTerms.length === 0) return [];
 

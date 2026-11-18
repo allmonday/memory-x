@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "test": "node --test packages/core/tests/*.test.ts",
-    "crash-verify": "node scripts/crash-verify.ts"
+    "crash-verify": "node scripts/crash-verify.ts",
+    "eval": "node scripts/eval.ts"
   }
 }

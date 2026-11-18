@@ -266,8 +266,9 @@ session_before_compact
 - [x] FTS5 索引 + 增量维护 + memory_search（trigram ≥3 字词 + LIKE 双字词兜底；命中带链路/祖先/兄弟/片段；写入后自动重建，旧库打开时补建）
 - [x] 访问信号记录（recordAccess：search/read 命中即记）
 - [x] 自动召回：before_agent_start 对用户输入跑检索，top-3 追加进 <memory> 段（双轨：自动兜底 + 工具精准）
-- [ ] 评估集 v1（30 条）建立，hit@3 记录为基线
-- **DoD**：✅ 51/51 测试；✅ E2E：真实数据搜索命中带链路；评估集待建
+- [x] 评估集 v1（15 题真题，本地保存不入库）+ 跑分器（scripts/eval.ts，hit@1/@3/MRR，子树容忍匹配）
+- [x] 基线与调优：0.53 → **0.73**（CJK 长词滑窗拆 trigram；剩余 4 miss 全为语义同义型，为向量层的明确依据）
+- **DoD**：✅ 52/52 测试；✅ E2E；✅ 基线存档 eval/results/
 
 ### M4 — 评估与调优（持续）
 - [ ] 评估脚本 + 指标面板（终端表格即可）

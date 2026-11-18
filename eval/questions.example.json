@@ -1,0 +1,26 @@
+[
+  {
+    "id": "demo-1",
+    "type": "exact",
+    "query": "SQLite 镜像方案",
+    "expect": "工作/pi生态调研"
+  },
+  {
+    "id": "demo-2",
+    "type": "paraphrase",
+    "query": "数据库坏了怎么恢复",
+    "expect": "工作/pi生态调研"
+  },
+  {
+    "id": "demo-3",
+    "type": "short2",
+    "query": "体检",
+    "expect": "生活/健康"
+  },
+  {
+    "id": "demo-4",
+    "type": "content",
+    "query": "崩溃窗口分析",
+    "expect": "工作/pi生态调研"
+  }
+]

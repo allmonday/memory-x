@@ -1,3 +1,5 @@
 memory/
 .memory/
 node_modules/
+eval/questions.json
+eval/results/

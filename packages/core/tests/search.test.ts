@@ -56,6 +56,14 @@ test("LIKE 兜底：2 字短词（trigram 无法命中）", async () => {
   assert.equal(hits[0]!.via, "like");
 });
 
+test("CJK 长词滑窗拆分：整句可命中包含其片段的文档", async () => {
+  const { mf } = await seeded();
+  // 整句作为子串匹配不到；滑窗 trigram 后应命中含「镜像方案」的 content
+  const hits = mf.search("镜像方案的细节是什么");
+  assert.ok(hits.length >= 1);
+  assert.equal(hits[0]!.path, "工作/pi生态调研");
+});
+
 test("无命中返回空；topK 生效", async () => {
   const { mf } = await seeded();
   assert.equal(mf.search("完全不存在的词汇xyzq").length, 0);
