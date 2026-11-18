@@ -89,6 +89,14 @@ function arrEq(a: string[], b: string[]): boolean {
   return true;
 }
 
+/**
+ * 转义 LIKE 模式中的通配符（`\`、`%`、`_`），配合 `... LIKE ? ESCAPE '\'` 使用。
+ * 物化 path 可能含这些字符（如标题带 `%`），不转义会误伤/越界匹配。
+ */
+export function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, "\\$&");
+}
+
 export interface SearchHit {
   path: string;
   title: string;
@@ -303,11 +311,11 @@ export class MemoryStore {
     return out;
   }
 
-  /** 供检索层：按 path 前缀查节点（含完整链路）。 */
+  /** 供检索层：按 path 前缀查节点（含完整链路）。通配符已转义。 */
   findByPathPrefix(prefix: string): NodeRow[] {
     return this.db
-      .prepare("SELECT * FROM nodes WHERE path = ? OR path LIKE ? ORDER BY depth, ord")
-      .all(prefix, `${prefix}/%`) as NodeRow[];
+      .prepare("SELECT * FROM nodes WHERE path = ? OR path LIKE ? ESCAPE '\\' ORDER BY depth, ord")
+      .all(prefix, `${escapeLike(prefix)}/%`) as NodeRow[];
   }
 
   // ---------- 检索层（全部派生，可随时重建） ----------
@@ -341,8 +349,14 @@ export class MemoryStore {
    * 检索：FTS5 trigram（≥3 字词，bm25 排序 + snippet）∪ LIKE 兜底（2 字短词）。
    * 排序 = 检索分 × 访问频次加成 × 新鲜度加成（P5：用得多的记忆更易被召回）。
    * 返回带完整链路/祖先/兄弟/命中片段的富化结果。
+   *
+   * scope：可选，物化节点路径（由 MemoryFile 模糊解析后规范化）。
+   * 只返回该节点自身及其子树的命中（对齐 OpenViking「search a directory, not the whole index」）。
+   * 过滤下推到 SQL：FTS 的 LIMIT 在 WHERE 之后，故 scope 下召回仍足量。
    */
-  search(query: string, topK = 5): SearchHit[] {
+  search(query: string, topK = 5, scope?: string): SearchHit[] {
+    const sc = scope && scope.trim() !== "" ? scope : undefined;
+    const scopePat = sc ? `${escapeLike(sc)}/%` : undefined;
     const tokens = (query.match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => !STOPWORDS.has(t.toLowerCase()));
     if (tokens.length === 0) return [];
     // CJK 长词滑窗拆分：整句子串匹配召回过低（"我最喜欢的科学家是谁" 匹配不到含"科学家"的文档）。
@@ -369,14 +383,19 @@ export class MemoryStore {
     const seen = new Map<string, RawHit>();
 
     if (ftsTerms.length > 0) {
+      const scopeClause = sc ? " AND (path = ? OR path LIKE ? ESCAPE '\\')" : "";
       const rows = this.db
         .prepare(
           `SELECT path, title,
              snippet(memory_fts, 2, '«', '»', '…', 16) AS snip, rank
-           FROM memory_fts WHERE memory_fts MATCH ? AND path != ''
+           FROM memory_fts WHERE memory_fts MATCH ? AND path != ''${scopeClause}
            ORDER BY rank LIMIT ?`,
         )
-        .all(ftsTerms.join(" OR "), Math.max(topK * 2, 10)) as Array<{
+        .all(
+          ...[ftsTerms.join(" OR ")],
+          ...(sc ? [sc, scopePat] : []),
+          Math.max(topK * 2, 10),
+        ) as Array<{
         path: string;
         title: string;
         snip: string;
@@ -388,16 +407,17 @@ export class MemoryStore {
     }
 
     if (shortTerms.length > 0) {
+      const scopeClause = sc ? " AND (n.path = ? OR n.path LIKE ? ESCAPE '\\')" : "";
       for (const term of shortTerms) {
         const pat = `%${term}%`;
         const rows = this.db
           .prepare(
             `SELECT DISTINCT n.path, n.title, n.content FROM nodes n
              LEFT JOIN leaves l ON l.node_id = n.id
-             WHERE n.path != '' AND (n.title LIKE ? ESCAPE ' ' OR n.content LIKE ? ESCAPE ' ' OR l.text LIKE ? ESCAPE ' ')
+             WHERE n.path != '' AND (n.title LIKE ? ESCAPE ' ' OR n.content LIKE ? ESCAPE ' ' OR l.text LIKE ? ESCAPE ' ')${scopeClause}
              LIMIT 50`,
           )
-          .all(pat, pat, pat) as Array<{ path: string; title: string; content: string | null }>;
+          .all(pat, pat, pat, ...(sc ? [sc, scopePat] : [])) as Array<{ path: string; title: string; content: string | null }>;
         for (const r of rows) {
           if (seen.has(r.path)) continue;
           const body = r.content ?? "";

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MemoryFile } from "../src/memory-file.ts";
+import { escapeLike } from "../src/index.ts";
 
 async function seeded(): Promise<{ dir: string; mf: MemoryFile }> {
   const dir = await mkdtemp(join(tmpdir(), "mx-search-"));
@@ -134,4 +135,61 @@ test("检索不把根节点当命中（根标题 'Memory' 不再污染结果）"
   const hits = mf.search("memory");
   assert.ok(hits.some((h) => h.path === "工作/调研"), "真节点应命中");
   assert.ok(hits.every((h) => h.path !== ""), "不应返回根节点空路径");
+});
+
+// ---------- scope 限定子树（P1） ----------
+
+async function scoped(): Promise<MemoryFile> {
+  const dir = await mkdtemp(join(tmpdir(), "mx-scope-"));
+  const mf = await MemoryFile.open(dir);
+  await mf.upsertNode("工作/甲", "共用关键词 alpha");
+  await mf.upsertNode("生活/乙", "共用关键词 alpha");
+  await mf.upsertNode("工作2/丙", "边界关键词 gamma");
+  await mf.upsertNode("工作/丁", "边界关键词 gamma");
+  return mf;
+}
+
+test("scope 限定子树：只回该子树命中，且自身节点也算", async () => {
+  const mf = await scoped();
+  const all = mf.search("alpha");
+  assert.equal(all.length, 2, "不传 scope 时全树命中");
+  const scoped1 = mf.search("alpha", 5, "工作");
+  assert.equal(scoped1.length, 1);
+  assert.equal(scoped1[0]!.path, "工作/甲");
+  // 指向命中节点自身
+  const self = mf.search("alpha", 5, "工作/甲");
+  assert.equal(self.length, 1);
+  assert.equal(self[0]!.path, "工作/甲");
+});
+
+test("scope 前缀边界：'工作' 不误伤 '工作2'", async () => {
+  const mf = await scoped();
+  const scopedHits = mf.search("gamma", 5, "工作");
+  assert.deepEqual(
+    scopedHits.map((h) => h.path),
+    ["工作/丁"],
+    "'工作2/丙' 不应被 '工作/' 前缀命中",
+  );
+});
+
+test("scope 指向根（或空）＝全树", async () => {
+  const mf = await scoped();
+  const rootScope = mf.search("alpha", 5, "");
+  assert.equal(rootScope.length, 2);
+});
+
+test("scope 不存在返回空；模糊解析可容错", async () => {
+  const mf = await scoped();
+  assert.deepEqual(mf.search("alpha", 5, "根本没有的节点"), []);
+  // '工昨' 编辑距离 1，容错命中 '工作'
+  const fuzzy = mf.search("alpha", 5, "工昨");
+  assert.deepEqual(
+    fuzzy.map((h) => h.path),
+    ["工作/甲"],
+  );
+});
+
+test("escapeLike 转义 LIKE 通配符（%/_/\\）", () => {
+  assert.equal(escapeLike("a%b_c\\d"), "a\\%b\\_c\\\\d");
+  assert.equal(escapeLike("普通路径"), "普通路径");
 });

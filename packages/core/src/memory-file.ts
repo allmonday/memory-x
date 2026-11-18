@@ -5,7 +5,7 @@ import { applyOutline, parseFragment } from "./fragment.ts";
 import { withDirLock } from "./lock.ts";
 import { deleteNode, moveNode, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
-import { resolvePath, forEachWithPath } from "./path.ts";
+import { canonicalPathOf, resolvePath, forEachWithPath } from "./path.ts";
 import { serializeSubtree } from "./serializer.ts";
 import { MemoryStore } from "./store.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
@@ -111,9 +111,26 @@ export class MemoryFile {
     return tocDigest(this.root, opts);
   }
 
-  /** 检索：FTS ∪ LIKE 兜底，命中带完整链路/祖先/兄弟。 */
-  search(query: string, topK?: number) {
-    const hits = this.store.search(query, topK);
+  /**
+   * 检索：FTS ∪ LIKE 兜底，命中带完整链路/祖先/兄弟。
+   * scope 可选：限定在某个节点及其子树内检索。先模糊解析该路径，
+   * 取规范物化路径（含 [n] 消歧）后交给 store；指向根＝全树；解析不到时返回空。
+   */
+  search(query: string, topK?: number, scope?: string) {
+    let canonical: string | undefined;
+    if (scope && scope.trim() !== "") {
+      this.reloadIfStale();
+      const r = resolvePath(this.root, scope, { fuzzy: true });
+      if (!r) return [];
+      if (r.node === this.root) {
+        canonical = undefined; // 根 = 全树
+      } else {
+        const p = canonicalPathOf(this.root, r.node);
+        if (p == null) return [];
+        canonical = p;
+      }
+    }
+    const hits = this.store.search(query, topK, canonical);
     if (hits.length > 0) this.store.recordAccess(hits.map((h) => h.path));
     return hits;
   }

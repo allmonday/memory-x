@@ -20,6 +20,7 @@ import {
   diffLines,
   diffStats,
   dumpTree,
+  enumerateNodePaths,
   formatDiff,
   lintTree,
   parseFragment,
@@ -327,24 +328,27 @@ export default function memoryExtension(pi: any): void {
     name: "memory_search",
     label: "搜记忆",
     description:
-      "在长期记忆树中检索（FTS+兜底）：返回命中节点的完整链路、祖先/兄弟、命中片段。不确定信息在哪个节点时先用它，再 memory_read 取全文",
+      "在长期记忆树中检索（FTS+兜底）：返回命中节点的完整链路、祖先/兄弟、命中片段。不确定信息在哪个节点时先用它，再 memory_read 取全文。可用 scope 限定在某个节点子树内检索",
     promptSnippet: "检索长期记忆树（返回链路）",
     promptGuidelines: [
       "Use memory_search instead of guessing node paths when the topic may relate to stored memory but the TOC does not clearly show where it lives.",
+      "When you already know the relevant subtree (a project/topic node), pass scope to search only within it instead of the whole tree.",
     ],
     parameters: {
       type: "object",
       properties: {
         query: { type: "string", description: "检索词（关键词、话题、同义改写均可）" },
+        scope: { type: "string", description: "可选：限定检索的节点路径（只搜该节点及其子树）" },
         top_k: { type: "number", description: "返回条数（默认 5）" },
       },
       required: ["query"],
     },
-    async execute(_toolCallId: string, params: { query: string; top_k?: number }) {
+    async execute(_toolCallId: string, params: { query: string; scope?: string; top_k?: number }) {
       const m = await memory();
-      const hits = m.search(params.query, params.top_k ?? 5);
+      const hits = m.search(params.query, params.top_k ?? 5, params.scope);
       if (hits.length === 0) {
-        return text(`无命中：「${params.query}」。可换关键词，或 memory_read 目录下钻。`);
+        const scoped = params.scope ? `（范围：${params.scope}）` : "";
+        return text(`无命中：「${params.query}」${scoped}。可换关键词，或 memory_read 目录下钻。`);
       }
       const lines = hits.map((h, i) => {
         const chain = [...h.ancestors, h.title].join(" › ");
@@ -721,25 +725,14 @@ interface NodeEntry {
   label: string;
 }
 
-/** 枚举全树节点及其规范路径（与 store.saveTree 同一套消歧规则），供 picker 与路径规范化。 */
+/** 枚举全树节点及其规范路径（含 [n] 消歧），供 picker 与路径规范化。复用 core 的 enumerateNodePaths。 */
 function enumerateNodes(root: any): NodeEntry[] {
-  const out: NodeEntry[] = [];
   const countLeaves = (n: any): number =>
     n.leaves.length + n.children.reduce((s: number, c: any) => s + countLeaves(c), 0);
-  const walk = (children: any[], parentPath: string) => {
-    const counts = new Map<string, number>();
-    for (const c of children) {
-      const seen = (counts.get(c.title) ?? 0) + 1;
-      counts.set(c.title, seen);
-      const seg = seen > 1 ? `${c.title}[${seen}]` : c.title;
-      const path = parentPath ? `${parentPath}/${seg}` : seg;
-      const total = countLeaves(c);
-      out.push({ node: c, path, label: `${path}${total > 0 ? ` [${total}]` : ""}` });
-      walk(c.children, path);
-    }
-  };
-  walk(root.children, "");
-  return out;
+  return enumerateNodePaths(root).map(({ node, path }) => {
+    const total = countLeaves(node);
+    return { node, path, label: `${path}${total > 0 ? ` [${total}]` : ""}` };
+  });
 }
 
 /** 树中是否存在带 content（完整信息）的节点——整树整理会丢 content，用于告警。 */

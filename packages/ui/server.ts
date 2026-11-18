@@ -70,7 +70,8 @@ export async function startUiServer(mfFactory: () => Promise<MemoryFile>, opts: 
       }
       if (url.pathname === "/api/search") {
         const q = url.searchParams.get("q") ?? "";
-        return json(res, 200, { hits: q ? mf.search(q, 10) : [] });
+        const scope = url.searchParams.get("scope") ?? undefined;
+        return json(res, 200, { hits: q ? mf.search(q, 10, scope) : [] });
       }
       if (url.pathname === "/api/lint") {
         return json(res, 200, { issues: lintTree(mf.root) });

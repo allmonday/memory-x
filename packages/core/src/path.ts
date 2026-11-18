@@ -84,6 +84,26 @@ export function forEachWithPath(
   }
 }
 
+/**
+ * 枚举全树节点及其物化规范路径（重名兄弟带 `[n]` 消歧，与 store.flatten 同一套规则）。
+ * 供 scope 限定、整理 picker、路径规范化复用。
+ */
+export function enumerateNodePaths(root: MemoryNode): Array<{ node: MemoryNode; path: string }> {
+  const out: Array<{ node: MemoryNode; path: string }> = [];
+  forEachWithPath(root.children, "", (node, path) => out.push({ node, path }));
+  return out;
+}
+
+/** 目标节点在树中的物化规范路径；根节点返回 `""`，未找到返回 null。 */
+export function canonicalPathOf(root: MemoryNode, target: MemoryNode): string | null {
+  if (target === root) return "";
+  let found: string | null = null;
+  forEachWithPath(root.children, "", (node, path) => {
+    if (node === target) found = path;
+  });
+  return found;
+}
+
 export function levenshtein(a: string, b: string): number {
   if (a === b) return 0;
   const m = a.length;
