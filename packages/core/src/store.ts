@@ -223,6 +223,9 @@ export interface EvidenceRef {
 /** 变更审计行（从 undo log + 物化态派生，不落盘；供 /memory changes 与 log --diff）。 */
 export interface ChangeRow {
   revisionId: number;
+  /** 该版本的操作名（如 tidy/upsert）与人类可读说明，便于按版本归组回滚 */
+  revOp: string;
+  revDetail: string | null;
   op: string;
   path: string;
   uid: string;
@@ -926,9 +929,9 @@ export class MemoryStore {
 
   /** 某版本相对上一版本的节点级变更（git log 风格，从 undo 行 + 物化态派生）。 */
   private deriveChanges(revisionId: number, cap: number): ChangeRow[] {
-    const rev = this.db.prepare("SELECT id, created_at FROM revisions WHERE id = ?").get(revisionId) as
-      | { id: number; created_at: string }
-      | undefined;
+    const rev = this.db
+      .prepare("SELECT id, op, detail, created_at FROM revisions WHERE id = ?")
+      .get(revisionId) as { id: number; op: string; detail: string | null; created_at: string } | undefined;
     if (!rev) return [];
     const rows = this.db
       .prepare("SELECT uid, path, deleted, before FROM changes WHERE revision_id = ? ORDER BY path, uid")
@@ -943,7 +946,17 @@ export class MemoryStore {
     const out: ChangeRow[] = [];
     const push = (op: string, path: string, uid: string, from: string | null, to: string | null) => {
       if (out.length < cap) {
-        out.push({ revisionId, op, path, uid, fromText: from, toText: to, createdAt: rev.created_at });
+        out.push({
+          revisionId,
+          revOp: rev.op,
+          revDetail: rev.detail,
+          op,
+          path,
+          uid,
+          fromText: from,
+          toText: to,
+          createdAt: rev.created_at,
+        });
       }
     };
     for (const r of rows) {

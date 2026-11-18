@@ -138,6 +138,20 @@ test("MemoryFile.applyOps：一次落为一个版本，可回滚", async () => {
   assert.deepEqual(mf.readSection("工作/甲")!.node.leaves, ["旧"], "回滚整批");
 });
 
+test("applyOps：落盘为一版，detail 与 changes 可查（含 revOp/revDetail）", async () => {
+  const mf = await MemoryFile.open(await tmpDir());
+  await mf.upsertNode("工作/甲", "旧");
+  const r = await mf.applyOps([{ op: "update_leaf", path: "工作/甲", match: "旧", leaf: "新" }], "整理说明X");
+  const rev = Number(r.revision);
+  const head = mf.listRevisions(1)[0]!;
+  assert.equal(head.op, "tidy");
+  assert.equal(head.detail, "整理说明X");
+  const rows = mf.listChanges({ revisionId: rev });
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every((c) => c.revisionId === rev && c.revOp === "tidy" && c.revDetail === "整理说明X"));
+  assert.ok(rows.some((c) => c.op === "add" && c.toText === "新"));
+});
+
 test("MemoryFile.previewOps：对克隆树试跑，不改动真树", async () => {
   const mf = await MemoryFile.open(await tmpDir());
   await mf.upsertNode("工作/甲", "旧");

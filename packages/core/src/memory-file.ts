@@ -235,10 +235,14 @@ export class MemoryFile {
    * 结构化批量操作（tidy 落盘）：一批 ops 在同一 mutate 事务里按序应用。
    * 任一条失败即整批回滚（不产生半吊子写入），落为一个可回滚的新版本。
    */
-  async applyOps(ops: TreeOp[]): Promise<OpResult> {
+  async applyOps(ops: TreeOp[], detail?: string | null): Promise<OpResult> {
     return this.mutate("tidy", `(${ops.length} 个操作)`, (root) => {
       runBatchOps(root, ops);
-      return { changed: true, path: `(${ops.length} 个操作)`, detail: `结构整理：${ops.length} 个操作` };
+      return {
+        changed: true,
+        path: `(${ops.length} 个操作)`,
+        detail: detail && detail.trim() !== "" ? detail.trim() : `结构整理：${ops.length} 个操作`,
+      };
     });
   }
 

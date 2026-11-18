@@ -44,7 +44,7 @@ flowchart TB
 
 - **读路径**：`search` → 派生索引（FTS5 ∪ LIKE，bm25 + 信号加成）→ 回读树拿到完整链路与片段 → 注入 `memory_recall`。
 - **写路径**：`upsert` / `update` / `write_note` / `move` / `delete`，以及整理 `tidy`（一批结构化 ops 一次落盘）→ core 树语义与逐操作校验 → 原子落盘（WAL + 文件锁），同时把每个被触碰节点的**变更前状态**按稳定 `uid` 追加到 `changes`（undo log）→ 派生索引增量更新。
-- **整理（tidy）**：模型读记忆树（Markdown 只作只读 review 视图）→ 调 `memory_propose(ops)` 提交**结构化操作列表**（`add_leaf`/`update_leaf`/`remove_leaf`/`rename`/`move`/`add_node`/`delete`/`set_note`/`set_summary`）→ `tidy show` 对克隆树预演并展示结构差异 → `tidy apply` 按序原子应用（任一条失败整批回滚）。不重写整棵树，未提及的节点保持不变。
+- **整理（tidy）**：模型读记忆树（Markdown 只作只读 review 视图）→ 调 `memory_propose(ops)` 提交**结构化操作列表**（`add_leaf`/`update_leaf`/`remove_leaf`/`rename`/`move`/`add_node`/`delete`/`set_note`/`set_summary`）→ **直接落盘为一个版本**（对克隆树先干跑校验，失败整批回滚；成功则按序原子应用）。不重写整棵树，未提及的节点保持不变。本轮 tidy 的变更可在 `/memory changes`（按版本分组）看到，`/memory rollback <id>` 回滚。
 - **可回滚**：任意版本由「当前态 + 逆推 `revision_id > target` 的 undo 行」物化；`/memory rollback <id>` 只是再落一版，不改写历史，因此可前滚。`/memory changes` 的逐条变更由 undo 行 + 物化态**派生**，不另占存储。
 
 ## 快速开始
@@ -68,10 +68,10 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 
 ```
 /memory                    # 看记忆目录
-/memory tidy               # 整理（做梦）：弹树选范围（节点=局部 / 整棵树=全局）→ 模型出结构化操作草稿（ops）→ show 预演 → apply 确认落盘
+/memory tidy               # 整理（做梦）：弹树选范围（节点=局部 / 整棵树=全局）→ 模型提交结构化操作 → 直接落盘为一个版本（可回滚）
 /memory tidy <节点路径>     # 直接指定局部整理范围（懒得打路径可无参弹树选择）
 /memory tidy [<路径>] -- <指导语>  # 追加整理指导（注入整理 prompt，如"合并重复，保留最近3个月"）
-/memory tidy show|apply|discard
+/memory changes            # 最近变更（按版本分组，含 op/detail，挑版本回滚）
 /memory log                # 版本历史（change log）
 /memory rollback <id>      # 回滚到指定版本（历史保留，可再滚回来）
 /memory stats              # 规模统计

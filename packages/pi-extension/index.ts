@@ -82,7 +82,6 @@ function clampEpisodeText(s: string): string {
 
 // ---------- 整理（做梦）模式状态 ----------
 let tidyMode = false;
-let tidyDraft: { ops: TreeOp[]; summary?: string; createdAt: string } | null = null;
 /** 整理作用域：null=整棵树（全局），否则为目标节点路径（局部整理） */
 let tidyScope: string | null = null;
 
@@ -94,7 +93,7 @@ function gateTidyWrites(pi: any): void {
     if (tidyMode && TIDY_WRITE_TOOLS.has(event.toolName)) {
       return {
         block: true,
-        reason: "整理模式进行中：直接写入已禁用。请用 memory_propose 提交整理方案，用户确认后经 /memory tidy apply 落盘",
+        reason: "整理模式进行中：直接写入已禁用。请用 memory_propose 提交整理操作（会直接落盘为一个可回滚的版本）",
       };
     }
     return undefined;
@@ -487,9 +486,9 @@ export default function memoryExtension(pi: any): void {
 
   pi.registerTool({
     name: "memory_propose",
-    label: "提交整理方案",
+    label: "提交整理并落盘",
     description:
-      "整理模式专用：提交结构化的操作列表（草稿，不落盘）。仅在收到[整理任务]时使用；提交后提醒用户 /memory tidy show 查看、/memory tidy apply 确认",
+      "整理模式专用：提交结构化的操作列表并**直接落盘**为一个版本（可 /memory rollback 回滚）。仅在收到[整理任务]时使用；落盘后在回复里给出本版本变更摘要与回滚命令",
     parameters: {
       type: "object",
       properties: {
@@ -533,16 +532,29 @@ export default function memoryExtension(pi: any): void {
           );
           if (bad) throw new Error(`操作超出整理范围「${tidyScope}」：${JSON.stringify(bad)}`);
         }
-        // 干跑校验：全部操作能在克隆树上跑通，才收草稿
+        const scopeLabel = tidyScope === null ? "整棵树" : `节点「${tidyScope}」`;
+        // 干跑校验（不改树）：全部操作能在克隆树上跑通，先拿变更预览
         const preview = m.previewOps(params.ops);
         if (!preview.ok) throw new Error(preview.error);
-        tidyDraft = { ops: params.ops, summary: params.summary, createdAt: new Date().toISOString() };
         const rows = diffToChangeRows(preview.diff);
+        const prevId = m.listRevisions(2)[1]?.id;
+        // 直接落盘：整批一个版本
+        const r = await m.applyOps(params.ops, params.summary);
+        tidyMode = false;
+        tidyScope = null;
+        invalidateToc();
+        const lines = rows
+          .slice(0, 40)
+          .map((c) => `${c.op} ${c.path}${c.to ? ` → ${c.to}` : c.from ? ` ← ${c.from}` : ""}`);
         return text(
-          `方案已收草稿（未落盘，${tidyScope === null ? "整棵树" : `节点「${tidyScope}」`}）：${params.ops.length} 个操作，预计 ${rows.length} 处结构变化。${params.summary ? `整理说明：${params.summary}\n` : ""}请提醒用户：/memory tidy show 查看，/memory tidy apply 确认落盘，/memory tidy discard 丢弃`,
+          `整理已落盘（${scopeLabel}）：版本 #${r.revision}，${params.ops.length} 个操作 / ${rows.length} 处变化。${
+            params.summary ? `\n整理说明：${params.summary}` : ""
+          }\n\n本版本变更（/memory changes 查看）：\n${lines.join("\n")}${
+            rows.length > lines.length ? `\n…（另有 ${rows.length - lines.length} 处）` : ""
+          }\n\n回滚：/memory rollback ${prevId ?? Number(r.revision) - 1}`,
         );
       } catch (e) {
-        return text(`方案校验失败（未收草稿）：${(e as Error).message}`);
+        return text(`整理落盘失败（未改动）：${(e as Error).message}`);
       }
     },
   });
@@ -613,6 +625,12 @@ export default function memoryExtension(pi: any): void {
 
   // ---------- 采集：每轮把用户/助手/工具结果落 episodes（P4 原始证据） ----------
   pi.on("turn_end", async (event: any, ctx: any) => {
+    // 整理模式收尾：模型若未调用 memory_propose，解禁写工具（避免永久锁写）
+    if (tidyMode) {
+      tidyMode = false;
+      tidyScope = null;
+      ctx?.ui?.notify?.("整理模式已结束（写工具解禁）", "info");
+    }
     if (!CAPTURE_ON) return undefined;
     try {
       const m = await memory();
@@ -646,6 +664,22 @@ export default function memoryExtension(pi: any): void {
   });
 
   // ---------- 命令 ----------
+
+  /** 把变更行按版本归组：`#id op · detail` 头 + 缩进的逐条变更，便于挑版本回滚。 */
+  const formatChangesByRevision = (changes: any[]): string => {
+    const out: string[] = [];
+    let cur = -1;
+    for (const c of changes) {
+      if (c.revisionId !== cur) {
+        cur = c.revisionId;
+        out.push(`${out.length ? "\n" : ""}#${c.revisionId} ${c.revOp}${c.revDetail ? ` · ${c.revDetail}` : ""}`);
+      }
+      out.push(
+        `  ${c.op} ${c.path}${c.toText ? ` → ${c.toText.slice(0, 50)}` : c.fromText ? ` ← ${c.fromText.slice(0, 50)}` : ""}`,
+      );
+    }
+    return out.join("\n");
+  };
 
   pi.registerCommand("memory", {
     description: "Memory X：/memory 目录 | ui 只读浏览器视图 | tidy 整理（做梦）| lint 体检 | log 历史 | rollback <id> | commit 抽取 | changes 审计 | episodes 事件 | stats | dump",
@@ -692,10 +726,10 @@ export default function memoryExtension(pi: any): void {
             ctx.ui.notify("暂无变更审计记录", "info");
             return;
           }
-          const lines = changes.map(
-            (c) => `#${c.revisionId ?? "-"} ${c.op} ${c.path ?? ""}${c.toText ? ` → ${c.toText.slice(0, 50)}` : c.fromText ? ` ← ${c.fromText.slice(0, 50)}` : ""}`,
+          ctx.ui.notify(
+            `最近变更（${changes.length} 条，按版本）：\n${formatChangesByRevision(changes)}\n\n回滚某版本：/memory rollback <#id>`,
+            "info",
           );
-          ctx.ui.notify(`最近变更（${changes.length}）：\n${lines.join("\n")}`, "info");
           return;
         }
         const recent = m.listEpisodes({ limit: 60 });
@@ -733,10 +767,10 @@ export default function memoryExtension(pi: any): void {
           ctx.ui.notify("暂无变更审计记录", "info");
           return;
         }
-        const lines = changes.map(
-          (c) => `#${c.revisionId ?? "-"} ${c.op} ${c.path ?? ""}${c.toText ? ` → ${c.toText.slice(0, 50)}` : c.fromText ? ` ← ${c.fromText.slice(0, 50)}` : ""}`,
+        ctx.ui.notify(
+          `最近变更（${changes.length} 条，按版本）：\n${formatChangesByRevision(changes)}\n\n回滚某版本：/memory rollback <#id>`,
+          "info",
         );
-        ctx.ui.notify(`最近变更（${changes.length}）：\n${lines.join("\n")}`, "info");
         return;
       }
 
@@ -786,67 +820,6 @@ export default function memoryExtension(pi: any): void {
         } else if (after === "--") {
           scopeArg = "";
         }
-        const sub = scopeArg;
-
-        if (sub === "show") {
-          if (!tidyDraft) {
-            ctx.ui.notify("没有待审方案。先用 /memory tidy 发起整理", "error");
-            return;
-          }
-          const scopeLabel = tidyScope === null ? "整棵树" : `节点「${tidyScope}」`;
-          const opLines = tidyDraft.ops.map((o, i) => {
-            const { op, ...rest } = o as unknown as Record<string, unknown>;
-            const parts = Object.entries(rest)
-              .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-              .join(" ");
-            return `${i + 1}. ${op} ${parts}`;
-          });
-          const preview = m.previewOps(tidyDraft.ops);
-          if (!preview.ok) {
-            ctx.ui.notify(`方案校验未通过：${preview.error}\n\n操作列表：\n${opLines.join("\n")}`, "error");
-            return;
-          }
-          const rows = diffToChangeRows(preview.diff);
-          const changeLines = rows.map(
-            (r) => `${r.op} ${r.path}${r.to ? ` → ${r.to}` : r.from ? ` ← ${r.from}` : ""}`,
-          );
-          ctx.ui.notify(
-            `方案草稿（${scopeLabel}，${tidyDraft.createdAt.slice(0, 16).replace("T", " ")}）：${tidyDraft.ops.length} 个操作，${rows.length} 处变化${
-              tidyDraft.summary ? `\n整理说明：${tidyDraft.summary}` : ""
-            }\n\n操作：\n${opLines.join("\n")}${
-              changeLines.length ? `\n\n结构变化：\n${changeLines.join("\n")}` : ""
-            }\n\n确认：/memory tidy apply · 丢弃：/memory tidy discard`,
-            "info",
-          );
-          return;
-        }
-
-        if (sub === "apply") {
-          if (!tidyDraft) {
-            ctx.ui.notify("没有待审方案", "error");
-            return;
-          }
-          const scopeLabel = tidyScope === null ? "整棵树" : `节点「${tidyScope}」`;
-          const r = await m.applyOps(tidyDraft.ops);
-          tidyMode = false;
-          tidyDraft = null;
-          tidyScope = null;
-          invalidateToc();
-          ctx.ui.notify(
-            r.ok ? `整理已落盘（${scopeLabel}，版本 #${r.revision}，不合适可 /memory rollback 回滚）` : `落盘失败：${r.path}`,
-            "info",
-          );
-          return;
-        }
-
-        if (sub === "discard") {
-          tidyMode = false;
-          tidyDraft = null;
-          tidyScope = null;
-          ctx.ui.notify("已丢弃方案，写工具解禁", "info");
-          return;
-        }
-
         if (scopeArg !== "") {
           // 显式节点路径 → 局部整理（模糊解析后取规范路径，保证结构化操作路径精确命中）
           const wantPath = scopeArg;
@@ -977,7 +950,7 @@ const OPS_GUIDE = [
   "规则：path/from/to/parent 用物化规范路径（重名兄弟带 [n]）；match 必须是节点内**精确且唯一**的叶子原文；rename 同层不得重名；一条一事；时间戳保留。",
   "只做必要的改动——未在 ops 中提及的节点会原样保留，不会被重写。",
   "【禁止调用其它写工具（upsert/update/move/delete/…）——它们在整理模式下被拦截】。",
-  "完成后调用 memory_propose 提交 ops + 一句话整理说明，然后告知用户 /memory tidy show 查看、/memory tidy apply 确认。",
+  "完成后调用 memory_propose 提交 ops（会**直接落盘**为一个版本，可 /memory rollback 回滚）+ 一句话整理说明；随后在回复里给出本版本变更摘要与回滚命令。",
 ];
 
 /**
@@ -989,7 +962,6 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null,
   if (scope === null) {
     tidyMode = true;
     tidyScope = null;
-    tidyDraft = null;
     const lint = lintTree(m.root);
     pi.sendMessage(
       {
@@ -1031,7 +1003,6 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null,
   }
   tidyMode = true;
   tidyScope = scope;
-  tidyDraft = null;
   const lint = lintTree(m.root).filter((i) => i.path === scope || i.path.startsWith(`${scope}/`));
   pi.sendMessage(
     {
