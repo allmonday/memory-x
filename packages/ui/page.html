@@ -43,6 +43,8 @@
   .crumb b { color: var(--accent); }
   h2.nd-title { font-size: 18px; margin-bottom: 12px; }
   .node-summary { color: var(--dim); font-size: 13px; margin: -6px 0 12px; }
+  .summary-tag { display: inline-block; font-size: 11px; color: var(--dim); border: 1px solid var(--border);
+                 border-radius: 4px; padding: 0 5px; margin-right: 6px; vertical-align: 1px; }
   ul.leaves { list-style: none; margin: 0 0 16px; }
   ul.leaves li { padding: 4px 0 4px 14px; margin-left: 2px; }
   .content-block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
@@ -376,7 +378,7 @@ function showNode(n) {
   const segs = n.path.split("/");
   const crumb = segs.map((s, i) => (i === segs.length - 1 ? `<b>${esc(s)}</b>` : esc(s))).join(" › ");
   let html = `<div class="crumb">${crumb}</div><h2 class="nd-title">${esc(n.title)}</h2>`;
-  if (n.summary) html += `<div class="node-summary">${inlineMd(n.summary)}</div>`;
+  if (n.summary) html += `<div class="node-summary"><span class="summary-tag">摘要</span>${inlineMd(n.summary)}</div>`;
   if (n.leaves.length > 0) {
     html += `<ul class="leaves">` +
       n.leaves.map((l) => `<li>${inlineMd(l)}</li>`).join("") + "</ul>";
