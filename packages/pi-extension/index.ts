@@ -20,6 +20,7 @@ import {
   diffStats,
   dumpTree,
   formatDiff,
+  lintTree,
   parseFragment,
   serializeMarkdown,
   tocDigest,
@@ -123,7 +124,18 @@ export default function memoryExtension(pi: any): void {
       const m = await memory();
       const r = await m.upsertNode(params.path, params.leaf);
       if (r.changed) invalidateToc();
-      return text(r.changed ? `已写入 ${r.path}（版本 #${r.revision}，可用 /memory rollback 回滚）` : `已存在，无需写入：${r.path}`);
+      // 结构守卫（非阻断，只给模型提示）
+      const hints: string[] = [];
+      const depth = r.path.split("/").length;
+      if (depth > 4) hints.push(`路径已达 ${depth} 层——深埋的内容通常是新主题信号，考虑提升为兄弟`);
+      const sec = m.readSection(r.path);
+      if (sec && sec.node.leaves.length > 20) hints.push(`该节点叶子已达 ${sec.node.leaves.length} 条——考虑按主题分叉`);
+      return text(
+        r.changed
+          ? `已写入 ${r.path}（版本 #${r.revision}，可用 /memory rollback 回滚）${hints.length ? "\n⚠️ " + hints.join("；") : ""}`
+          : `已存在，无需写入：${r.path}`,
+      );
+    },
     },
   });
 
@@ -328,6 +340,24 @@ export default function memoryExtension(pi: any): void {
       const m = await memory();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
 
+      if (tokens[0] === "lint") {
+        const m = await memory();
+        const issues = lintTree(m.root);
+        if (issues.length === 0) {
+          ctx.ui.notify("结构健康 ✓（深度/广度/叶子/重名/时间性命名均达标）", "info");
+          return;
+        }
+        const warns = issues.filter((i) => i.level === "warn");
+        const infos = issues.filter((i) => i.level === "info");
+        ctx.ui.notify(
+          `结构体检：${warns.length} 项警告，${infos.length} 项建议\n\n${issues
+            .map((i) => `[${i.level === "warn" ? "⚠" : "ℹ"}] ${i.rule} @ ${i.path || "(根)"}\n    ${i.message}`)
+            .join("\n")}\n\n修复：/memory tidy（模型会优先处理以上问题）`,
+          "info",
+        );
+        return;
+      }
+
       if (tokens[0] === "tidy") {
         const sub = tokens[1];
         const m = await memory();
@@ -337,12 +367,19 @@ export default function memoryExtension(pi: any): void {
           tidyMode = true;
           tidyDraft = null;
           const tree = serializeMarkdown(m.root);
+          const lint = lintTree(m.root);
           pi.sendMessage(
             {
               customType: "memory-tidy",
               content: [
                 "[整理任务] 请分析下面的记忆树并给出整理后的完整新树方案。",
                 "整理目标：合并重复/分散的事实；理顺层级与命名；精简冗长叶子（保留要点，不丢信息）；剔除明显过期内容。",
+                ...(lint.length > 0
+                  ? [
+                      "结构体检发现以下问题，方案必须优先处理：",
+                      ...lint.map((i) => `- [${i.rule}] ${i.path || "(根)"}：${i.message}`),
+                    ]
+                  : []),,
                 "约束：保持 markdown outline 文法（H2=顶层域，叶子一行一事）；不要新建过深层级（≤5）；时间戳保留。",
                 "【禁止调用任何写工具（upsert/move/delete/apply_outline）——它们在整理模式下被拦截】。",
                 "完成后调用 memory_propose 提交完整新树（outline 参数）+ 一句话整理说明，然后告知用户用 /memory tidy show 查看、/memory tidy apply 确认。",
