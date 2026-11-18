@@ -9,7 +9,7 @@
     "test": "node --test packages/core/tests/*.test.ts",
     "crash-verify": "node scripts/crash-verify.ts",
     "eval": "node scripts/eval.ts",
-    "eval:locomo": "node scripts/locomo.ts",
+    "eval:memory": "node scripts/memory-eval.ts",
     "ui": "node scripts/ui.ts"
   },
   "bin": {

@@ -1,7 +1,6 @@
 /**
- * 极简 OpenAI 兼容 chat 客户端 + token 计量。
+ * 共享 LLM 客户端（OpenAI 兼容）+ token 计量。
  * 默认走 pi 运行时网关（$PI_RUNTIME_GATEWAY_URL），密钥 $LITELLM_API_KEY。
- * 可被任何评估脚本复用。
  */
 export interface Usage {
   calls: number;
@@ -31,7 +30,7 @@ export class LlmClient {
     return new LlmClient(base.replace(/\/+$/, ""), key, model);
   }
 
-  async chat(system: string, user: string, maxTokens = 600): Promise<string> {
+  async chat(system: string, user: string, maxTokens = 4000): Promise<string> {
     const res = await fetch(`${this.base}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.key}` },
@@ -58,7 +57,6 @@ export class LlmClient {
     return d.choices?.[0]?.message?.content ?? "";
   }
 
-  /** 一行可读的用量摘要 */
   usageLine(): string {
     const u = this.usage;
     return `LLM 调用 ${u.calls} 次 · prompt ${u.promptTokens} · completion ${u.completionTokens} · 合计 ${u.totalTokens} tokens`;
