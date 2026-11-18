@@ -1,0 +1,142 @@
+/**
+ * LoCoMo 评估器（入口）
+ * ====================
+ * 见 eval/locomo/README.md。适配层在 eval/locomo/adapter.ts，LLM 客户端在 eval/locomo/llm.ts。
+ *
+ * 用法：
+ *   npm run eval:locomo                             # 仅检索（确定性、零 LLM）
+ *   node scripts/locomo.ts --sample 200 --answer    # 分层抽 ~200 题做端到端（回答+判分）
+ *   node scripts/locomo.ts --conv conv-26 --limit 20 --topK 5
+ *   node scripts/locomo.ts --data /path/to/locomo/data/locomo10.json   # 复用本地数据集
+ *
+ * 数据集位置：--data > $LOCOMO_DATA > ~/.cache/memory-x/locomo/locomo10.json > 下载。
+ * 结果写入 eval/locomo/runs/<时间戳>/（gitignore）。
+ */
+import { mkdir, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { MemoryFile } from "../packages/core/src/index.ts";
+import {
+  CATEGORY_NAMES,
+  EVAL_CATEGORIES,
+  buildOutline,
+  goldSessions,
+  resolveDataset,
+  selectQuestions,
+  sessionCount,
+  type QA,
+} from "../eval/locomo/adapter.ts";
+import { LlmClient } from "../eval/locomo/llm.ts";
+import { ANSWER_SYSTEM, JUDGE_SYSTEM, answerUser, isCorrect, judgeUser } from "../eval/locomo/prompts.ts";
+
+// ---------- CLI ----------
+function arg(name: string): string | undefined {
+  const i = process.argv.indexOf(`--${name}`);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+const flag = (name: string): boolean => process.argv.includes(`--${name}`);
+
+const TOP_K = Number(arg("topK") ?? "5");
+const LIMIT = Number(arg("limit") ?? "0");
+const SAMPLE = Number(arg("sample") ?? "0");
+const SEED = Number(arg("seed") ?? "1");
+const CONV = arg("conv");
+const WITH_ANSWER = flag("answer");
+
+const RUN_DIR = resolve("eval/locomo/runs", new Date().toISOString().replace(/[:.]/g, "-"));
+
+interface Row {
+  conv: string;
+  q: string;
+  cat: number;
+  rank: number; // 首个 gold session 在 topK 的名次（-1=miss）
+  pred?: string;
+  correct?: boolean;
+}
+
+async function main(): Promise<void> {
+  const { path: dataPath, data } = await resolveDataset(arg("data"));
+  console.log(`数据集：${dataPath}`);
+  const convs = CONV ? data.filter((c) => c.sample_id === CONV) : data;
+  if (convs.length === 0) throw new Error(`找不到会话 ${CONV}`);
+
+  const sel = selectQuestions(convs, { sample: SAMPLE, limit: LIMIT, seed: SEED });
+  if (SAMPLE > 0) {
+    const d = [...sel.dist.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => `cat${k}:${v}`).join(" ");
+    console.log(`分层抽样 ${sel.total} 题（seed=${SEED}）→ ${d}`);
+  }
+
+  const llm = WITH_ANSWER ? LlmClient.fromEnv(arg("model")) : null;
+  if (llm) console.log(`LLM：${llm.model}`);
+
+  await mkdir(RUN_DIR, { recursive: true });
+  const rows: Row[] = [];
+
+  for (const c of convs) {
+    const qas: QA[] = sel.byConv.get(c.sample_id) ?? [];
+    if (qas.length === 0) continue;
+    const mf = await MemoryFile.open(join(RUN_DIR, c.sample_id));
+    await mf.applyTree(buildOutline(c)); // 一次成型：session 节点 + 轮次叶子
+    console.log(`\n▶ ${c.sample_id}：${sessionCount(c.conversation)} sessions · ${qas.length} 题${llm ? "（含 LLM 问答）" : "（仅检索）"}`);
+
+    for (const q of qas) {
+      const hits = mf.search(q.question, TOP_K);
+      const gold = goldSessions(q);
+      const row: Row = { conv: c.sample_id, q: q.question, cat: q.category, rank: hits.findIndex((h) => gold.has(h.path)) };
+      if (llm && EVAL_CATEGORIES.has(q.category)) {
+        const memories = hits.map((h) => mf.renderSection(h.path) ?? "").join("\n\n---\n\n");
+        row.pred = (await llm.chat(ANSWER_SYSTEM, answerUser(memories, q.question))).trim();
+        const verdict = await llm.chat(JUDGE_SYSTEM, judgeUser(q.question, q.answer, row.pred));
+        row.correct = isCorrect(verdict);
+      }
+      rows.push(row);
+    }
+    await writeFile(join(RUN_DIR, `${c.sample_id}.json`), JSON.stringify(rows.filter((r) => r.conv === c.sample_id), null, 2));
+  }
+
+  // ---------- 汇总 ----------
+  const n = rows.length;
+  const hit1 = rows.filter((r) => r.rank === 0).length;
+  const hit3 = rows.filter((r) => r.rank >= 0 && r.rank < 3).length;
+  const hitk = rows.filter((r) => r.rank >= 0).length;
+  const mrr = rows.reduce((s, r) => s + (r.rank >= 0 ? 1 / (r.rank + 1) : 0), 0) / n;
+  console.log(`\n════════ 检索（${n} 题，topK=${TOP_K}）════════`);
+  console.log(`hit@1 ${(hit1 / n).toFixed(3)}  hit@3 ${(hit3 / n).toFixed(3)}  hit@${TOP_K} ${(hitk / n).toFixed(3)}  MRR ${mrr.toFixed(3)}`);
+
+  let cats: Record<number, { ok: number; n: number }> | undefined;
+  if (llm) {
+    console.log(`\n════════ 端到端 J-score（LLM 判分，仅类 1-4）════════`);
+    cats = {};
+    let tot = 0;
+    let ok = 0;
+    for (const cat of [1, 2, 3, 4]) {
+      const rs = rows.filter((r) => r.cat === cat && r.correct !== undefined);
+      if (rs.length === 0) continue;
+      const c = rs.filter((r) => r.correct).length;
+      cats[cat] = { ok: c, n: rs.length };
+      tot += rs.length;
+      ok += c;
+      console.log(`  cat${cat} ${CATEGORY_NAMES[cat]!.padEnd(11)} ${(c / rs.length).toFixed(3)}  (${c}/${rs.length})`);
+    }
+    console.log(`  ${"总体".padEnd(15)} ${(ok / tot).toFixed(3)}  (${ok}/${tot})`);
+    console.log(`\n${llm.usageLine()}`);
+  }
+
+  const summary = {
+    timestamp: new Date().toISOString(),
+    dataset: dataPath,
+    topK: TOP_K,
+    withAnswer: WITH_ANSWER,
+    sample: SAMPLE || undefined,
+    seed: SAMPLE ? SEED : undefined,
+    n,
+    retrieval: { hit1, hit3, hitk, mrr: Number(mrr.toFixed(4)) },
+    jscore: cats ? { byCategory: cats, total: { ok: Object.values(cats).reduce((s, x) => s + x.ok, 0), n: Object.values(cats).reduce((s, x) => s + x.n, 0) } } : undefined,
+    usage: llm ? llm.usage : undefined,
+    rows,
+  };
+  const out = join(RUN_DIR, "summary.json");
+  await writeFile(out, JSON.stringify(summary, null, 2));
+  console.log(`\n结果：${out}`);
+}
+
+await main();
