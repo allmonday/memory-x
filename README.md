@@ -52,6 +52,7 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 /memory                    # 看记忆目录
 /memory tidy               # 整理（做梦）：弹树选范围（节点=局部 / 整棵树=全局）→ 模型出方案草稿 → show 看 diff → apply 确认落盘
 /memory tidy <节点路径>     # 直接指定局部整理范围（懒得打路径可无参弹树选择）
+/memory tidy [<路径>] -- <指导语>  # 追加整理指导（注入整理 prompt，如"合并重复，保留最近3个月"）
 /memory tidy show|apply|discard
 /memory log                # 版本历史（change log）
 /memory rollback <id>      # 回滚到指定版本（历史保留，可再滚回来）

@@ -378,7 +378,7 @@ export default function memoryExtension(pi: any): void {
   // ---------- 命令 ----------
 
   pi.registerCommand("memory", {
-    description: "Memory X：/memory 目录 | ui 只读浏览器视图 | tidy [节点路径] 整理（无参弹树选范围）| lint 体检 | log 历史 | rollback <id> | stats | dump",
+    description: "Memory X：/memory 目录 | ui 只读浏览器视图 | tidy [节点路径] [-- 指导] 整理（无参弹树）| lint 体检 | log 历史 | rollback <id> | stats | dump",
     handler: async (args: string, ctx: any) => {
       const m = await memory();
       const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -422,8 +422,22 @@ export default function memoryExtension(pi: any): void {
       }
 
       if (tokens[0] === "tidy") {
-        const sub = tokens[1];
         const m = await memory();
+        // 解析：/memory tidy [<路径>] [-- <指导语>]（" -- " 之后为注入整理 prompt 的自由文本）
+        const after = args.trim().replace(/^tidy\b/, "").trim();
+        let scopeArg = after;
+        let hint: string | null = null;
+        const sepIdx = after.indexOf(" -- ");
+        if (sepIdx >= 0) {
+          scopeArg = after.slice(0, sepIdx).trim();
+          hint = after.slice(sepIdx + 4).trim() || null;
+        } else if (after.startsWith("-- ")) {
+          scopeArg = "";
+          hint = after.slice(3).trim() || null;
+        } else if (after === "--") {
+          scopeArg = "";
+        }
+        const sub = scopeArg;
 
         if (sub === "show") {
           if (!tidyDraft) {
@@ -478,9 +492,9 @@ export default function memoryExtension(pi: any): void {
           return;
         }
 
-        if (sub !== undefined) {
+        if (scopeArg !== "") {
           // 显式节点路径 → 局部整理（模糊解析后取规范路径，保证 applyOutline 精确命中）
-          const wantPath = tokens.slice(1).join(" ");
+          const wantPath = scopeArg;
           const sec = m.readSection(wantPath);
           if (!sec) {
             const tops = m.root.children.map((c) => c.title).join("、") || "（空）";
@@ -488,14 +502,14 @@ export default function memoryExtension(pi: any): void {
             return;
           }
           const canonical = enumerateNodes(m.root).find((e) => e.node === sec.node)?.path ?? wantPath;
-          await beginTidy(pi, m, ctx, canonical);
+          await beginTidy(pi, m, ctx, canonical, hint);
           return;
         }
 
         // 无参 → 弹出树，选择范围（节点 = 局部整理；整棵树 = 全局整理）
         if (ctx.hasUI === false) {
           // print/json 模式无法交互：退回全局整理（保持旧行为）
-          await beginTidy(pi, m, ctx, null);
+          await beginTidy(pi, m, ctx, null, hint);
           return;
         }
         const entries = enumerateNodes(m.root);
@@ -508,7 +522,7 @@ export default function memoryExtension(pi: any): void {
           return;
         }
         const scope = picked === TIDY_GLOBAL_LABEL ? null : entries.find((e) => e.label === picked)?.path ?? picked.trim();
-        await beginTidy(pi, m, ctx, scope);
+        await beginTidy(pi, m, ctx, scope, hint);
         return;
       }
 
@@ -619,8 +633,9 @@ function hasContent(node: any): boolean {
 /**
  * 发起整理：设置作用域与草稿状态，向模型投递 [整理任务]。
  * scope=null → 全局（整树）；否则 → 局部（该节点的叶子+子节点，content 保留）。
+ * hint 非空时作为「用户附加指导」拼进整理任务 prompt。
  */
-async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null): Promise<void> {
+async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null, hint: string | null = null): Promise<void> {
   if (scope === null) {
     tidyMode = true;
     tidyScope = null;
@@ -641,6 +656,7 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null)
           "约束：保持 markdown outline 文法（H2=顶层域，叶子一行一事）；不要新建过深层级（≤5）；时间戳保留。",
           "【禁止调用任何写工具（upsert/move/delete/apply_outline）——它们在整理模式下被拦截】。",
           "完成后调用 memory_propose 提交完整新树（outline 参数）+ 一句话整理说明，然后告知用户用 /memory tidy show 查看、/memory tidy apply 确认。",
+          ...(hint ? ["", "用户附加指导（请优先遵循）：", hint] : []),
           ...(hasContent(m.root)
             ? [
                 "",
@@ -657,7 +673,7 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null)
       },
       { triggerTurn: true },
     );
-    ctx.ui.notify("全局整理任务已发起（做梦中…）：模型将提出方案草稿，写工具已临时禁用", "info");
+    ctx.ui.notify(`全局整理任务已发起（做梦中…）${hint ? "，含附加指导" : ""}：模型将提出方案草稿，写工具已临时禁用`, "info");
     return;
   }
 
@@ -693,6 +709,7 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null)
         "- 方案文法：列表项（- …）＝该节点自身的叶子（须排在第一个标题前）；## / ### ＝其子节点层级；不要输出该节点自己的标题行。",
         "【禁止调用任何写工具（upsert/move/delete/apply_outline）——它们在整理模式下被拦截】。",
         "完成后调用 memory_propose 提交该节点的新内容 outline + 一句话整理说明，然后告知用户 /memory tidy show 查看、/memory tidy apply 确认。",
+        ...(hint ? ["", "用户附加指导（请优先遵循）：", hint] : []),
         "",
         `当前节点「${scope}」的内容（叶子 + 子节点，不含节点标题）：`,
         "```",
@@ -703,5 +720,5 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null)
     },
     { triggerTurn: true },
   );
-  ctx.ui.notify(`局部整理任务已发起：范围＝节点「${scope}」，写工具已临时禁用`, "info");
+  ctx.ui.notify(`局部整理任务已发起：范围＝节点「${scope}」${hint ? "，含附加指导" : ""}，写工具已临时禁用`, "info");
 }
