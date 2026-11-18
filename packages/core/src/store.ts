@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryNode } from "./types.ts";
@@ -26,6 +26,7 @@ export const DB_FILE = "memory.db";
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS nodes(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT,
   parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
   ord INTEGER NOT NULL DEFAULT 0,
   title TEXT NOT NULL,
@@ -58,8 +59,8 @@ CREATE TABLE IF NOT EXISTS revisions(
   op TEXT NOT NULL,
   path TEXT,
   actor TEXT NOT NULL DEFAULT 'pi',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  tree TEXT NOT NULL
+  detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS episodes(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,22 +82,21 @@ CREATE TABLE IF NOT EXISTS evidence(
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_leaf ON evidence(node_path, leaf_hash);
 CREATE TABLE IF NOT EXISTS changes(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  revision_id INTEGER,
-  op TEXT NOT NULL,
-  path TEXT,
-  from_text TEXT,
-  to_text TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_changes_rev ON changes(revision_id);
+  revision_id INTEGER NOT NULL REFERENCES revisions(id) ON DELETE CASCADE,
+  uid TEXT NOT NULL,
+  path TEXT NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  before TEXT,
+  PRIMARY KEY(revision_id, uid)
+) WITHOUT ROWID;
 `;
 
-/** 历史快照保留上限（超过后裁剪最旧版本；个人规模 ≈ 几 MB） */
+/** 版本时间线保留上限（超过后裁剪最旧版本，undo 行随外键级联删除） */
 export const MAX_REVISIONS = 500;
 
 interface NodeRow {
   id: number;
+  uid: string;
   parent_id: number | null;
   ord: number;
   title: string;
@@ -109,20 +109,83 @@ interface NodeRow {
 
 /** 扁平化后的节点元数据（applyDelta 的 diff 单位） */
 interface FlatNode {
+  uid: string;
   title: string;
   leaves: string[];
   content: string | null;
   summary: string | null;
   summaryHash: string | null;
   parentPath: string | null;
+  parentUid: string | null;
   ord: number;
   depth: number;
+}
+
+/** 节点在某一版本的状态（undo log 的 before 值）。parent 用 uid 引用，跨移动稳定。 */
+export interface NodeState {
+  title: string;
+  leaves: string[];
+  content: string | null;
+  summary: string | null;
+  summaryHash: string | null;
+  parentUid: string | null;
+  ord: number;
+}
+
+/** 一次写入的逐节点 undo 行（uid 为键，同一版本内每节点最多一行）。 */
+export interface DeltaEntry {
+  uid: string;
+  path: string;
+  deleted: boolean;
+  /** 变更前状态；null = 本节点为新增（undo = 删除） */
+  before: NodeState | null;
+}
+
+/** 扁平 uid 索引中的一个节点（uid → 路径 + 状态）。 */
+export interface UidNode {
+  path: string;
+  state: NodeState;
+}
+
+/** 给树中缺 uid 的节点补发稳定 uid（幂等）。 */
+export function ensureUids(root: MemoryNode): void {
+  const walk = (n: MemoryNode) => {
+    if (!n.uid) n.uid = randomUUID();
+    for (const c of n.children) walk(c);
+  };
+  walk(root);
 }
 
 function arrEq(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
+}
+
+/** FlatNode → undo 用的节点状态。 */
+function stateOf(f: FlatNode): NodeState {
+  return {
+    title: f.title,
+    leaves: f.leaves,
+    content: f.content,
+    summary: f.summary,
+    summaryHash: f.summaryHash,
+    parentUid: f.parentUid,
+    ord: f.ord,
+  };
+}
+
+/** 节点状态是否相同（决定是否要落 undo 行）。 */
+function stateEq(a: NodeState, b: NodeState): boolean {
+  return (
+    a.title === b.title &&
+    (a.content ?? null) === (b.content ?? null) &&
+    (a.summary ?? null) === (b.summary ?? null) &&
+    (a.summaryHash ?? null) === (b.summaryHash ?? null) &&
+    a.parentUid === b.parentUid &&
+    a.ord === b.ord &&
+    arrEq(a.leaves, b.leaves)
+  );
 }
 
 /**
@@ -157,12 +220,12 @@ export interface EvidenceRef {
   episodeId: number;
 }
 
-/** 变更审计行（每次写入自动记录，供 /memory changes 与 log --diff）。 */
+/** 变更审计行（从 undo log + 物化态派生，不落盘；供 /memory changes 与 log --diff）。 */
 export interface ChangeRow {
-  id: number;
-  revisionId: number | null;
+  revisionId: number;
   op: string;
-  path: string | null;
+  path: string;
+  uid: string;
   fromText: string | null;
   toText: string | null;
   createdAt: string;
@@ -185,8 +248,10 @@ export interface SearchHit {
 
 /**
  * SQLite 存储层（B 案）：nodes 表为操作真相源。
- * 每个节点带物化的完整链路 path（重名兄弟自动 [n] 消歧），
- * content 字段承载节点完整信息（RAG 语料）。
+ * 每个节点带稳定 uid（跨版本寻址，不随路径变化）与物化完整链路 path
+ * （重名兄弟自动 [n] 消歧），content 字段承载节点完整信息（RAG 语料）。
+ * 版本历史 = revisions 时间线 + changes 逐节点 undo log（存变更前状态）；
+ * 任意版本由当前态逆推 undo 行物化，无需整树快照。
  *
  * 写入策略：整树重写（单事务）。个人记忆规模（≤万级节点）下
  * 全量重建是毫秒级操作，换取与内存树的绝对一致，无增量同步 bug 面。
@@ -205,12 +270,62 @@ export class MemoryStore {
     this.migrate();
   }
 
-  /** 轻量迁移：旧库（无 summary 列）补列。CREATE TABLE IF NOT EXISTS 不会给已存在的表加列。 */
+  private columns(table: string): Set<string> {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return new Set(cols.map((c) => c.name));
+  }
+
+  /**
+   * 轻量迁移：旧库补列（summary/uid）+ 把旧 schema 的 revisions/changes 升级为 undo log。
+   * CREATE TABLE IF NOT EXISTS 不会改已存在的表，故结构变更都在此处显式处理。
+   */
   private migrate(): void {
-    const cols = this.db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string }>;
-    const have = new Set(cols.map((c) => c.name));
-    if (!have.has("summary")) this.db.exec("ALTER TABLE nodes ADD COLUMN summary TEXT");
-    if (!have.has("summary_hash")) this.db.exec("ALTER TABLE nodes ADD COLUMN summary_hash TEXT");
+    let destructive = false;
+    const nodeCols = this.columns("nodes");
+    if (!nodeCols.has("summary")) this.db.exec("ALTER TABLE nodes ADD COLUMN summary TEXT");
+    if (!nodeCols.has("summary_hash")) this.db.exec("ALTER TABLE nodes ADD COLUMN summary_hash TEXT");
+    if (!nodeCols.has("uid")) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN uid TEXT");
+      const rows = this.db.prepare("SELECT id FROM nodes").all() as Array<{ id: number }>;
+      const upd = this.db.prepare("UPDATE nodes SET uid = ? WHERE id = ?");
+      for (const r of rows) upd.run(randomUUID(), r.id);
+    }
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_uid ON nodes(uid)");
+
+    // 版本历史：旧 revisions 带整树快照列 tree → 丢弃整段旧历史（快照无法转成 undo log，
+    // 留着会误导回滚），时间线从 baseline 重新开始。
+    const revCols = this.columns("revisions");
+    if (revCols.has("tree")) {
+      destructive = true;
+      this.db.exec("BEGIN");
+      this.db.exec("DROP TABLE revisions");
+      this.db.exec(`CREATE TABLE revisions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        op TEXT NOT NULL, path TEXT, actor TEXT NOT NULL DEFAULT 'pi',
+        detail TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`);
+      this.db.exec("COMMIT");
+    } else if (!revCols.has("detail")) {
+      this.db.exec("ALTER TABLE revisions ADD COLUMN detail TEXT");
+    }
+
+    // 变更审计 → undo log：旧字段审计行（id/op/from_text）与新语义不兼容，重建。
+    const chCols = this.columns("changes");
+    if (chCols.has("from_text") || chCols.has("id")) this.db.exec("DROP TABLE changes");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS changes(
+      revision_id INTEGER NOT NULL REFERENCES revisions(id) ON DELETE CASCADE,
+      uid TEXT NOT NULL, path TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+      before TEXT, PRIMARY KEY(revision_id, uid)
+    ) WITHOUT ROWID`);
+
+    // 丢弃整树快照后回收空间（一次性；失败不阻断打开）
+    if (destructive) {
+      try {
+        this.db.exec("VACUUM");
+      } catch (e) {
+        if (process.env.MX_DEBUG) console.error("VACUUM failed:", e);
+      }
+    }
   }
 
   static open(dir: string): MemoryStore {
@@ -225,7 +340,7 @@ export class MemoryStore {
 
   loadTree(): MemoryNode {
     const nodeRows = this.db
-      .prepare("SELECT id, parent_id, ord, title, path, depth, content, summary, summary_hash FROM nodes ORDER BY depth, ord, id")
+      .prepare("SELECT id, uid, parent_id, ord, title, path, depth, content, summary, summary_hash FROM nodes ORDER BY depth, ord, id")
       .all() as NodeRow[];
     if (nodeRows.length === 0) return { title: "Memory", leaves: [], children: [] };
 
@@ -236,6 +351,7 @@ export class MemoryStore {
     const byId = new Map<number, MemoryNode & { __id: number; __parent: number | null }>();
     for (const r of nodeRows) {
       byId.set(r.id, {
+        uid: r.uid,
         title: r.title,
         leaves: [],
         content: r.content,
@@ -261,6 +377,7 @@ export class MemoryStore {
     }
     if (!root) throw new Error("存储损坏：找不到根节点（parent_id 为 NULL 的记录缺失）");
     const clean = (n: MemoryNode & { __id: number; __parent: number | null }): MemoryNode => ({
+      uid: n.uid,
       title: n.title,
       leaves: n.leaves,
       content: n.content,
@@ -273,8 +390,9 @@ export class MemoryStore {
 
   /** 整树重写（单事务）。path 物化：重名兄弟追加 [k]（k≥2）。 */
   saveTree(root: MemoryNode): void {
+    ensureUids(root);
     const insertNode = this.db.prepare(
-      "INSERT INTO nodes(parent_id, ord, title, path, depth, content, summary, summary_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO nodes(uid, parent_id, ord, title, path, depth, content, summary, summary_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     const insertLeaf = this.db.prepare("INSERT INTO leaves(node_id, ord, text) VALUES (?, ?, ?)");
 
@@ -291,7 +409,7 @@ export class MemoryStore {
           titleCount.set(child.title, seen);
           const seg = seen > 1 ? `${child.title}[${seen}]` : child.title;
           const path = parentPath === "" ? seg : `${parentPath}/${seg}`;
-          const info = insertNode.run(parentId, ord++, child.title, path, depth, child.content ?? null, child.summary ?? null, child.summaryHash ?? null);
+          const info = insertNode.run(child.uid, parentId, ord++, child.title, path, depth, child.content ?? null, child.summary ?? null, child.summaryHash ?? null);
           const id = Number(info.lastInsertRowid);
           for (let i = 0; i < child.leaves.length; i++) {
             insertLeaf.run(id, i, child.leaves[i]!);
@@ -300,7 +418,7 @@ export class MemoryStore {
         }
         return ord;
       };
-      const rootInfo = insertNode.run(null, 0, root.title, "", 0, root.content ?? null, root.summary ?? null, root.summaryHash ?? null);
+      const rootInfo = insertNode.run(root.uid, null, 0, root.title, "", 0, root.content ?? null, root.summary ?? null, root.summaryHash ?? null);
       const rootId = Number(rootInfo.lastInsertRowid);
       for (let i = 0; i < root.leaves.length; i++) {
         insertLeaf.run(rootId, i, root.leaves[i]!);
@@ -317,10 +435,14 @@ export class MemoryStore {
 
   /**
    * 把 base → next 的差异以节点级 SQL 写回（单事务）。
-   * 以物化 path 为稳定键：新增/更新按 path upsert，删除按 path 级联。
+   * 以物化 path 为定位键：新增/更新按 path upsert，删除按 path 级联。
    * 未被本进程改动的节点不出现在 diff 中，因此不会被覆盖（多写者安全）。
+   *
+   * 返回 uid 空间的 undo 行（每节点最多一条）：新增 before=null，
+   * 删除 deleted=true+before=旧态，修改 before=旧态。重命名/移动视为同 uid
+   * 的一条修改行（路径变了但身份不变），undo 时可精确改回原路径。
    */
-  applyDelta(base: MemoryNode, next: MemoryNode): void {
+  applyDelta(base: MemoryNode, next: MemoryNode): DeltaEntry[] {
     const b = this.flatten(base);
     const n = this.flatten(next);
 
@@ -343,11 +465,11 @@ export class MemoryStore {
 
     const delNode = this.db.prepare("DELETE FROM nodes WHERE path = ?");
     const upsertRow = this.db.prepare(
-      `INSERT INTO nodes(parent_id, ord, title, path, depth, content, summary, summary_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO nodes(uid, parent_id, ord, title, path, depth, content, summary, summary_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(path) DO UPDATE SET
-         parent_id = excluded.parent_id, ord = excluded.ord, title = excluded.title,
-         depth = excluded.depth, content = excluded.content,
+         uid = excluded.uid, parent_id = excluded.parent_id, ord = excluded.ord,
+         title = excluded.title, depth = excluded.depth, content = excluded.content,
          summary = excluded.summary, summary_hash = excluded.summary_hash,
          updated_at = datetime('now')`,
     );
@@ -365,7 +487,7 @@ export class MemoryStore {
           v.parentPath === null
             ? null
             : ((idOf.get(v.parentPath) as { id: number } | undefined)?.id ?? null);
-        upsertRow.run(parentId, v.ord, v.title, p, v.depth, v.content, v.summary, v.summaryHash);
+        upsertRow.run(v.uid, parentId, v.ord, v.title, p, v.depth, v.content, v.summary, v.summaryHash);
         const nodeId = (idOf.get(p) as { id: number }).id;
         delLeaves.run(nodeId);
         for (let i = 0; i < v.leaves.length; i++) insLeaf.run(nodeId, i, v.leaves[i]!);
@@ -375,19 +497,37 @@ export class MemoryStore {
       this.db.exec("ROLLBACK");
       throw e;
     }
+
+    // uid 空间 undo 行
+    const baseByUid = new Map<string, { path: string; state: NodeState }>();
+    for (const [path, v] of b) baseByUid.set(v.uid, { path, state: stateOf(v) });
+    const nextByUid = new Map<string, { path: string; state: NodeState }>();
+    for (const [path, v] of n) nextByUid.set(v.uid, { path, state: stateOf(v) });
+    const delta: DeltaEntry[] = [];
+    for (const [uid, nb] of nextByUid) {
+      const ob = baseByUid.get(uid);
+      if (!ob) delta.push({ uid, path: nb.path, deleted: false, before: null });
+      else if (!stateEq(ob.state, nb.state)) delta.push({ uid, path: ob.path, deleted: false, before: ob.state });
+    }
+    for (const [uid, ob] of baseByUid) {
+      if (!nextByUid.has(uid)) delta.push({ uid, path: ob.path, deleted: true, before: ob.state });
+    }
+    return delta;
   }
 
   /** 扁平化整树：物化 path → 节点元数据（与 saveTree 同一套 [n] 消歧规则）。 */
   private flatten(root: MemoryNode): Map<string, FlatNode> {
     const out = new Map<string, FlatNode>();
-    const walk = (node: MemoryNode, path: string, parentPath: string | null, ord: number, depth: number) => {
+    const walk = (node: MemoryNode, path: string, parentPath: string | null, parentUid: string | null, ord: number, depth: number) => {
       out.set(path, {
+        uid: node.uid!,
         title: node.title,
         leaves: node.leaves,
         content: node.content ?? null,
         summary: node.summary ?? null,
         summaryHash: node.summaryHash ?? null,
         parentPath,
+        parentUid,
         ord,
         depth,
       });
@@ -396,10 +536,10 @@ export class MemoryStore {
         const seen = (counts.get(c.title) ?? 0) + 1;
         counts.set(c.title, seen);
         const seg = seen > 1 ? `${c.title}[${seen}]` : c.title;
-        walk(c, path === "" ? seg : `${path}/${seg}`, path, i, depth + 1);
+        walk(c, path === "" ? seg : `${path}/${seg}`, path, node.uid!, i, depth + 1);
       });
     };
-    walk(root, "", null, 0, 0);
+    walk(root, "", null, null, 0, 0);
     return out;
   }
 
@@ -607,17 +747,18 @@ export class MemoryStore {
     for (const p of paths) stmt.run(p, now);
   }
 
-  // ---------- 版本历史（change log，移植自 MindMap X 的 MVCC 语义） ----------
-  // 差异：MindMap X 逐节点 before 增量 + 回溯物化；这里整树 JSON 快照，
-  // restore = 加载快照，零物化逻辑。共同不变式：回滚是前进（新版本），
-  // 历史永不改写。
+  // ---------- 版本历史（MVCC，移植自 MindMap X） ----------
+  // 真相 = 当前 nodes/leaves。revisions 只存时间线元数据（一行一次 mutation，无树内容）；
+  // changes = 逐节点 undo log（键 uid，存变更【前】状态）。
+  // 任意版本由「当前态 + 撤销 revision_id > target 的 before 行」物化（降序逆向回溯）。
+  // 不变式：回滚是前进（新版本），历史永不改写。
 
-  /** 记录一次变更（操作后的整树快照），返回版本号。 */
-  recordRevision(op: string, path: string | null, tree: unknown, actor = "pi"): number {
+  /** 记录一次变更的时间线元数据，返回版本号。 */
+  recordRevision(op: string, path: string | null, detail: string | null = null, actor = "pi"): number {
     const info = this.db
-      .prepare("INSERT INTO revisions(op, path, actor, tree) VALUES (?, ?, ?, ?)")
-      .run(op, path, actor, JSON.stringify(tree));
-    // 裁剪最旧历史
+      .prepare("INSERT INTO revisions(op, path, actor, detail) VALUES (?, ?, ?, ?)")
+      .run(op, path, actor, detail);
+    // 裁剪最旧历史（changes 随 FK 级联删除）
     this.db.exec(
       `DELETE FROM revisions WHERE id <= (SELECT MAX(id) - ${MAX_REVISIONS} FROM revisions)`,
     );
@@ -629,18 +770,222 @@ export class MemoryStore {
     return row.n;
   }
 
-  listRevisions(limit = 20): Array<{ id: number; op: string; path: string | null; actor: string; createdAt: string }> {
-    return this.db
-      .prepare("SELECT id, op, path, actor, created_at FROM revisions ORDER BY id DESC LIMIT ?")
-      .all(limit) as Array<{ id: number; op: string; path: string | null; actor: string; createdAt: string }>;
+  latestRevisionId(): number {
+    const row = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM revisions").get() as { id: number };
+    return row.id;
   }
 
-  /** 取某版本的整树快照（不存在返回 null）。 */
-  getRevisionTree(id: number): MemoryNode | null {
-    const row = this.db.prepare("SELECT tree FROM revisions WHERE id = ?").get(id) as
-      | { tree: string }
+  listRevisions(
+    limit = 20,
+  ): Array<{ id: number; op: string; path: string | null; actor: string; detail: string | null; createdAt: string }> {
+    const rows = this.db
+      .prepare("SELECT id, op, path, actor, detail, created_at FROM revisions ORDER BY id DESC LIMIT ?")
+      .all(limit) as Array<{
+      id: number;
+      op: string;
+      path: string | null;
+      actor: string;
+      detail: string | null;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      op: r.op,
+      path: r.path,
+      actor: r.actor,
+      detail: r.detail,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /** 写入一次变更的逐节点 undo 行（uid 唯一键，重复 uid 合并）。 */
+  recordChanges(revisionId: number, entries: DeltaEntry[]): void {
+    if (entries.length === 0) return;
+    const stmt = this.db.prepare(
+      "INSERT OR REPLACE INTO changes(revision_id, uid, path, deleted, before) VALUES (?, ?, ?, ?, ?)",
+    );
+    this.db.exec("BEGIN");
+    try {
+      for (const e of entries) {
+        stmt.run(revisionId, e.uid, e.path, e.deleted ? 1 : 0, e.before == null ? null : JSON.stringify(e.before));
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** 记录一次变更：时间线行 + 逐节点 undo 行（同一事务外调用，顺序保证一致）。 */
+  commitRevision(
+    op: string,
+    path: string | null,
+    detail: string | null,
+    entries: DeltaEntry[],
+    actor = "pi",
+  ): number {
+    const rev = this.recordRevision(op, path, detail, actor);
+    this.recordChanges(rev, entries);
+    return rev;
+  }
+
+  /** 当前节点的 uid 索引（uid → 路径 + 状态）。 */
+  private currentByUid(): Map<string, UidNode> {
+    const nodeRows = this.db
+      .prepare("SELECT id, uid, parent_id, ord, title, path, content, summary, summary_hash FROM nodes")
+      .all() as Array<{
+      id: number;
+      uid: string;
+      parent_id: number | null;
+      ord: number;
+      title: string;
+      path: string;
+      content: string | null;
+      summary: string | null;
+      summary_hash: string | null;
+    }>;
+    const leafRows = this.db
+      .prepare("SELECT node_id, ord, text FROM leaves ORDER BY node_id, ord, id")
+      .all() as Array<{ node_id: number; ord: number; text: string }>;
+    const leavesByNode = new Map<number, string[]>();
+    for (const l of leafRows) {
+      const arr = leavesByNode.get(l.node_id) ?? [];
+      arr.push(l.text);
+      leavesByNode.set(l.node_id, arr);
+    }
+    const uidById = new Map<number, string>();
+    for (const r of nodeRows) uidById.set(r.id, r.uid);
+    const map = new Map<string, UidNode>();
+    for (const r of nodeRows) {
+      map.set(r.uid, {
+        path: r.path,
+        state: {
+          title: r.title,
+          leaves: leavesByNode.get(r.id) ?? [],
+          content: r.content,
+          summary: r.summary,
+          summaryHash: r.summary_hash,
+          parentUid: r.parent_id == null ? null : (uidById.get(r.parent_id) ?? null),
+          ord: r.ord,
+        },
+      });
+    }
+    return map;
+  }
+
+  /** undo 行（uid 空间）。 */
+  private undoRows(afterRevision: number): Array<{ uid: string; path: string; deleted: boolean; before: string | null }> {
+    return this.db
+      .prepare("SELECT uid, path, deleted, before FROM changes WHERE revision_id > ? ORDER BY revision_id DESC, uid")
+      .all(afterRevision) as Array<{ uid: string; path: string; deleted: boolean; before: string | null }>;
+  }
+
+  /** 从 uid 索引重建内存树（子节点按 ord 排序）。 */
+  private treeFromUid(map: Map<string, UidNode>): MemoryNode {
+    const childrenOf = new Map<string, Array<{ uid: string; u: UidNode }>>();
+    let root: { uid: string; u: UidNode } | null = null;
+    for (const [uid, u] of map) {
+      if (u.state.parentUid == null) {
+        root = { uid, u };
+      } else {
+        const arr = childrenOf.get(u.state.parentUid) ?? [];
+        arr.push({ uid, u });
+        childrenOf.set(u.state.parentUid, arr);
+      }
+    }
+    if (!root) throw new Error("版本物化失败：找不到根节点");
+    const build = (uid: string, u: UidNode): MemoryNode => {
+      const kids = (childrenOf.get(uid) ?? []).sort((a, b) => a.u.state.ord - b.u.state.ord);
+      return {
+        uid,
+        title: u.state.title,
+        leaves: [...u.state.leaves],
+        content: u.state.content,
+        summary: u.state.summary,
+        summaryHash: u.state.summaryHash,
+        children: kids.map((k) => build(k.uid, k.u)),
+      };
+    };
+    return build(root.uid, root.u);
+  }
+
+  /**
+   * 物化某版本的整树（不存在返回 null）。
+   * 当前态出发，撤销 revision_id > target 的 undo 行（降序）即可回到该版本。
+   */
+  materializeTree(id: number): MemoryNode | null {
+    const exists = this.db.prepare("SELECT 1 AS x FROM revisions WHERE id = ?").get(id);
+    if (!exists) return null;
+    const map = this.currentByUid();
+    for (const r of this.undoRows(id)) {
+      if (r.before == null) map.delete(r.uid);
+      else map.set(r.uid, { path: r.path, state: JSON.parse(r.before) as NodeState });
+    }
+    return this.treeFromUid(map);
+  }
+
+  /** 某版本相对上一版本的节点级变更（git log 风格，从 undo 行 + 物化态派生）。 */
+  private deriveChanges(revisionId: number, cap: number): ChangeRow[] {
+    const rev = this.db.prepare("SELECT id, created_at FROM revisions WHERE id = ?").get(revisionId) as
+      | { id: number; created_at: string }
       | undefined;
-    return row ? (JSON.parse(row.tree) as MemoryNode) : null;
+    if (!rev) return [];
+    const rows = this.db
+      .prepare("SELECT uid, path, deleted, before FROM changes WHERE revision_id = ? ORDER BY path, uid")
+      .all(revisionId) as Array<{ uid: string; path: string; deleted: boolean; before: string | null }>;
+    if (rows.length === 0) return [];
+    // 该版本的末态：从当前态撤销 revision_id > revisionId 的行（本版本行未撤 → 正是本版本末态）
+    const after = this.currentByUid();
+    for (const r of this.undoRows(revisionId)) {
+      if (r.before == null) after.delete(r.uid);
+      else after.set(r.uid, { path: r.path, state: JSON.parse(r.before) as NodeState });
+    }
+    const out: ChangeRow[] = [];
+    const push = (op: string, path: string, uid: string, from: string | null, to: string | null) => {
+      if (out.length < cap) {
+        out.push({ revisionId, op, path, uid, fromText: from, toText: to, createdAt: rev.created_at });
+      }
+    };
+    for (const r of rows) {
+      if (r.before == null) {
+        const a = after.get(r.uid);
+        if (!a) continue;
+        push("add-node", a.path, r.uid, null, a.state.title);
+        for (const leaf of a.state.leaves) push("add", a.path, r.uid, null, leaf);
+        continue;
+      }
+      const b = JSON.parse(r.before) as NodeState;
+      if (r.deleted) {
+        push("remove-node", r.path, r.uid, b.title, null);
+        for (const leaf of b.leaves) push("remove", r.path, r.uid, leaf, null);
+        continue;
+      }
+      const a = after.get(r.uid);
+      if (!a) continue;
+      if (a.state.title !== b.title) push("rename", r.path, r.uid, b.title, a.state.title);
+      const oldSet = new Set(b.leaves);
+      const newSet = new Set(a.state.leaves);
+      for (const leaf of a.state.leaves) if (!oldSet.has(leaf)) push("add", a.path, r.uid, null, leaf);
+      for (const leaf of b.leaves) if (!newSet.has(leaf)) push("remove", a.path, r.uid, leaf, null);
+      if ((a.state.content ?? null) !== (b.content ?? null)) push("note-content", a.path, r.uid, null, null);
+      if ((a.state.summary ?? null) !== (b.summary ?? null)) push("note-summary", a.path, r.uid, null, null);
+      if (a.state.parentUid !== b.parentUid || a.state.ord !== b.ord) push("move", a.path, r.uid, null, null);
+    }
+    return out;
+  }
+
+  listChanges(opts: { revisionId?: number; limit?: number } = {}): ChangeRow[] {
+    const limit = opts.limit ?? 50;
+    if (opts.revisionId != null) return this.deriveChanges(opts.revisionId, limit);
+    const revs = this.db
+      .prepare("SELECT id FROM revisions ORDER BY id DESC LIMIT ?")
+      .all(Math.max(limit * 2, 50)) as Array<{ id: number }>;
+    const out: ChangeRow[] = [];
+    for (const r of revs) {
+      out.push(...this.deriveChanges(r.id, limit - out.length));
+      if (out.length >= limit) break;
+    }
+    return out.slice(0, limit);
   }
 
   // ---------- 原始证据（episodes / evidence） ----------
@@ -748,59 +1093,6 @@ export class MemoryStore {
             .all(nodePath)
     ) as Array<{ node_path: string; leaf_hash: string; episode_id: number }>;
     return rows.map((r) => ({ nodePath: r.node_path, leafHash: r.leaf_hash, episodeId: r.episode_id }));
-  }
-
-  // ---------- 变更审计（changes） ----------
-
-  recordChanges(
-    revisionId: number | null,
-    rows: Array<{ op: string; path?: string | null; from?: string | null; to?: string | null }>,
-  ): void {
-    if (rows.length === 0) return;
-    const stmt = this.db.prepare(
-      "INSERT INTO changes(revision_id, op, path, from_text, to_text) VALUES (?, ?, ?, ?, ?)",
-    );
-    this.db.exec("BEGIN");
-    try {
-      for (const r of rows) stmt.run(revisionId, r.op, r.path ?? null, r.from ?? null, r.to ?? null);
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
-  }
-
-  listChanges(opts: { revisionId?: number; limit?: number } = {}): ChangeRow[] {
-    const rows = (
-      opts.revisionId != null
-        ? this.db
-            .prepare(
-              "SELECT id, revision_id, op, path, from_text, to_text, created_at FROM changes WHERE revision_id = ? ORDER BY id",
-            )
-            .all(opts.revisionId)
-        : this.db
-            .prepare(
-              "SELECT id, revision_id, op, path, from_text, to_text, created_at FROM changes ORDER BY id DESC LIMIT ?",
-            )
-            .all(opts.limit ?? 50)
-    ) as Array<{
-      id: number;
-      revision_id: number | null;
-      op: string;
-      path: string | null;
-      from_text: string | null;
-      to_text: string | null;
-      created_at: string;
-    }>;
-    return rows.map((r) => ({
-      id: r.id,
-      revisionId: r.revision_id,
-      op: r.op,
-      path: r.path,
-      fromText: r.from_text,
-      toText: r.to_text,
-      createdAt: r.created_at,
-    }));
   }
 
   /** 按 id 批量取 episode（保持入参顺序去重后的升序）。 */

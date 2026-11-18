@@ -1,15 +1,15 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tocDigest, type TocOptions } from "./digest.ts";
-import { applyOutline, parseFragment } from "./fragment.ts";
 import { withDirLock } from "./lock.ts";
+import { applyOps as runBatchOps, type TreeOp } from "./ops-batch.ts";
 import { deleteNode, moveNode, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
-import { canonicalPathOf, resolvePath, forEachWithPath } from "./path.ts";
+import { canonicalPathOf, resolvePath } from "./path.ts";
 import { effectiveSummary, summaryHash } from "./summary.ts";
 import { serializeSubtree } from "./serializer.ts";
-import { MemoryStore, leafHash, type Episode, type EvidenceRef, type ChangeRow } from "./store.ts";
-import { diffTrees, diffToChangeRows, type TreeDiff } from "./tree-diff.ts";
+import { MemoryStore, ensureUids, leafHash, type Episode, type EvidenceRef, type ChangeRow } from "./store.ts";
+import { diffTrees, type TreeDiff } from "./tree-diff.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
 
 export const MEMORY_FILE = "MEMORY.md";
@@ -18,13 +18,14 @@ const EMPTY_DOC = "# Memory\n";
 /**
  * 记忆文件对象（B 案存储 + 版本历史）：
  *
- *   真相源   .memory/memory.db（nodes 表 + revisions 变更日志）
- *   版本历史  每次 persist 记一条整树快照（MAX_REVISIONS 内保留）；
- *            回滚 = 加载快照落为新版本（历史不改写，可再回滚回来）
+ *   真相源   .memory/memory.db（nodes 表）
+ *   版本历史  revisions（时间线元数据）+ changes（逐节点 undo log，存变更前状态）；
+ *            任意版本 = 当前态逆推 undo 行物化；回滚 = 落为新版本（历史不改写，可前后滚）
  *   崩溃安全  SQLite WAL 事务（无镜像文件、无 git）
  *
- * 工作模型：open 时整树载入内存，操作改内存树，persist 整树单事务写回 +
- * 记版本 + 重建检索索引。旧版 Markdown 数据在 db 为空时自动导入（一次性）。
+ * 工作模型：open 时整树载入内存，操作改内存树，persist 只把节点级差异写回 +
+ * 记 undo 行 + 重建检索索引。节点身份由稳定 uid 承载（不随路径变化）。
+ * 旧版 Markdown 数据在 db 为空时自动导入（一次性）。
  */
 export class MemoryFile {
   readonly dir: string;
@@ -54,17 +55,19 @@ export class MemoryFile {
         // 全新目录
       }
       root = parseMarkdown(md);
+      ensureUids(root);
       if (root.children.length > 0 || root.leaves.length > 0) {
         store.saveTree(root);
         store.rebuildFts();
-        store.recordRevision("import", null, root);
+        store.recordRevision("import", null);
       }
     } else {
       root = store.loadTree();
+      ensureUids(root);
       if (store.ftsIsEmpty()) store.rebuildFts();
       // 版本历史上线前的存量数据 → 记基线版本
       if (store.revisionCount() === 0) {
-        store.recordRevision("baseline", null, root);
+        store.recordRevision("baseline", null);
       }
     }
     const mf = new MemoryFile(dir, root, store);
@@ -76,6 +79,7 @@ export class MemoryFile {
   /** 同步从 DB 重载内存树与基线（含版本号）。 */
   private syncFromStore(): void {
     this.root = this.store.loadTree();
+    ensureUids(this.root);
     this.base = structuredClone(this.root);
     this.loadedRevision = this.store.listRevisions(1)[0]?.id ?? 0;
   }
@@ -88,6 +92,7 @@ export class MemoryFile {
     const latest = this.store.listRevisions(1)[0]?.id ?? 0;
     if (latest === this.loadedRevision) return false;
     this.root = this.store.loadTree();
+    ensureUids(this.root);
     this.base = structuredClone(this.root);
     this.loadedRevision = latest;
     return true;
@@ -212,13 +217,6 @@ export class MemoryFile {
     });
   }
 
-  async applyOutline(path: string, outline: string): Promise<OpResult> {
-    return this.mutate("apply_outline", path, (root) => {
-      const r = applyOutline(root, path, outline);
-      return { changed: r.changed, path: r.resolvedPath };
-    });
-  }
-
   async moveNode(from: string, to: string): Promise<OpResult> {
     return this.mutate("move", `${from} -> ${to}`, (root) => {
       const ok = moveNode(root, from, to);
@@ -233,37 +231,27 @@ export class MemoryFile {
     });
   }
 
-  /** 整树替换（整理/做梦）：outline 为完整新树（相对 H2 起），根不挂叶子。 */
-  async applyTree(outline: string): Promise<OpResult> {
-    const frag = parseFragment(outline);
-    if (frag.leaves.length > 0) {
-      throw new Error("整树方案中根节点下不应有列表项（根只承载子域）");
-    }
-    const count = (ns: import("./types.ts").MemoryNode[]): number =>
-      ns.reduce((s, x) => s + 1 + x.leaves.length + count(x.children), 0);
-    if (count(frag.children) > 3000) {
-      throw new Error("整树方案过大（>3000 条目）");
-    }
-    return this.mutate("tidy", "(整树)", (root) => {
-      // content/summary 不在 outline 中表达：按物化路径把旧树的值迁回同路径节点。
-      // 改名/合并/移动导致路径变化的节点，无法自动映射（会丢失）；同路径节点完整保留。
-      const savedContent = new Map<string, { content: string | null; summary: string | null; summaryHash: string | null }>();
-      forEachWithPath(root.children, "", (node, path) => {
-        if (node.content != null || node.summary != null) {
-          savedContent.set(path, { content: node.content ?? null, summary: node.summary ?? null, summaryHash: node.summaryHash ?? null });
-        }
-      });
-      forEachWithPath(frag.children, "", (node, path) => {
-        const keep = savedContent.get(path);
-        if (keep) {
-          node.content = keep.content;
-          node.summary = keep.summary;
-          node.summaryHash = keep.summaryHash;
-        }
-      });
-      root.children = frag.children;
-      return { changed: true, path: "(整树)" };
+  /**
+   * 结构化批量操作（tidy 落盘）：一批 ops 在同一 mutate 事务里按序应用。
+   * 任一条失败即整批回滚（不产生半吊子写入），落为一个可回滚的新版本。
+   */
+  async applyOps(ops: TreeOp[]): Promise<OpResult> {
+    return this.mutate("tidy", `(${ops.length} 个操作)`, (root) => {
+      runBatchOps(root, ops);
+      return { changed: true, path: `(${ops.length} 个操作)`, detail: `结构整理：${ops.length} 个操作` };
     });
+  }
+
+  /** 预演一批 ops（对克隆树试跑），返回与当前树的结构差异；失败返回错误。不落盘。 */
+  previewOps(ops: TreeOp[]): { ok: true; diff: TreeDiff } | { ok: false; error: string } {
+    this.reloadIfStale();
+    const clone = structuredClone(this.root);
+    try {
+      runBatchOps(clone, ops);
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+    return { ok: true, diff: diffTrees(this.root, clone) };
   }
 
   // ---------- 原始证据 / 采集（P4） ----------
@@ -302,15 +290,15 @@ export class MemoryFile {
     return this.store.evidenceFor(path, leaf != null ? leafHash(leaf) : undefined);
   }
 
-  // ---------- 变更审计（P3） ----------
+  // ---------- 变更审计（P3，从 undo log 派生） ----------
 
   listChanges(opts: { revisionId?: number; limit?: number } = {}): ChangeRow[] {
     return this.store.listChanges(opts);
   }
 
-  /** 相对某个历史版本的结构差异（当前树 vs 该版本快照）。 */
+  /** 相对某个历史版本的结构差异（当前树 vs 该版本物化态）。 */
   diffSince(revisionId: number): TreeDiff | null {
-    const base = this.store.getRevisionTree(revisionId);
+    const base = this.store.materializeTree(revisionId);
     if (!base) return null;
     this.reloadIfStale();
     return diffTrees(base, this.root);
@@ -322,19 +310,18 @@ export class MemoryFile {
     return this.store.listRevisions(limit);
   }
 
-  /** 回滚到指定版本：加载快照 → 落为新版本（历史不改写，可再次回滚回来）。 */
+  /** 回滚到指定版本：物化该版本 → 整体替换落为新版本（历史不改写，可再回滚/前滚）。 */
   async restoreRevision(id: number): Promise<OpResult> {
-    const tree = this.store.getRevisionTree(id);
+    const tree = this.store.materializeTree(id);
     if (!tree) return { ok: false, path: `#${id}`, revision: null, changed: false };
     return this.mutate("restore", `#${id}`, (root) => {
-      if (JSON.stringify(tree) === JSON.stringify(root)) return { changed: false, path: `#${id}` };
       root.title = tree.title;
-      root.leaves = tree.leaves;
+      root.leaves = [...tree.leaves];
       root.content = tree.content;
       root.summary = tree.summary;
       root.summaryHash = tree.summaryHash;
-      root.children = tree.children;
-      return { changed: true, path: `#${id}` };
+      root.children = structuredClone(tree.children);
+      return { changed: true, path: `#${id}`, detail: `回滚到 #${id}` };
     });
   }
 
@@ -346,11 +333,11 @@ export class MemoryFile {
   private async mutate(
     op: string,
     path: string,
-    apply: (root: MemoryNode) => { changed: boolean; path: string; ok?: boolean },
+    apply: (root: MemoryNode) => { changed: boolean; path: string; ok?: boolean; detail?: string | null },
   ): Promise<OpResult> {
     return withDirLock(this.dir, async () => {
       this.reloadIfStale(); // 关键：应用前先对齐 DB（含他人写入）
-      let res: { changed: boolean; path: string; ok?: boolean };
+      let res: { changed: boolean; path: string; ok?: boolean; detail?: string | null };
       try {
         res = apply(this.root);
       } catch (e) {
@@ -360,14 +347,13 @@ export class MemoryFile {
       if (!res.changed) {
         return { ok: res.ok ?? true, path: res.path, revision: null, changed: false };
       }
-      this.store.applyDelta(this.base, this.root); // 节点级增量写（不再整树 DELETE+INSERT）
-      const rev = this.store.recordRevision(op, res.path, this.root); // change log（整树快照）
-      try {
-        // 结构化审计：记录本次相对基线的叶子/节点级变更
-        this.store.recordChanges(rev, diffToChangeRows(diffTrees(this.base, this.root)));
-      } catch {
-        // 审计失败不阻断写入
+      ensureUids(this.root); // 新节点补发稳定 uid（在 diff 前）
+      const delta = this.store.applyDelta(this.base, this.root); // 节点级增量写 + uid 空间 undo
+      if (delta.length === 0) {
+        this.base = structuredClone(this.root);
+        return { ok: true, path: res.path, revision: null, changed: false };
       }
+      const rev = this.store.commitRevision(op, res.path, res.detail ?? null, delta);
       this.store.rebuildFts(); // 派生索引
       this.base = structuredClone(this.root);
       this.loadedRevision = rev;

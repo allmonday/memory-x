@@ -425,7 +425,7 @@ async function showHistory() {
   $("#v-history").innerHTML = revisions.map((r) => `
     <div class="rev-item" data-id="${r.id}">
       <span class="id">#${r.id}</span><span class="op">${esc(r.op)}</span>
-      <span>${esc(r.path ?? "")}</span><span class="time">${r.created_at}</span>
+      <span>${esc(r.path ?? "")}${r.detail ? ` · ${esc(r.detail)}` : ""}</span><span class="time">${r.createdAt}</span>
     </div>`).join("") || `<div class="empty">暂无历史</div>`;
   $("#v-history").querySelectorAll(".rev-item").forEach((el) => {
     el.onclick = async () => {

@@ -64,7 +64,7 @@ function fuzzySibling(siblings: MemoryNode[], title: string, nth: number): Memor
 }
 
 /**
- * 按物化路径遍历子树（重名兄弟带 `[n]` 消歧，与 store.flatten / applyTree 同一套规则）。
+ * 按物化路径遍历子树（重名兄弟带 `[n]` 消歧，与 store.flatten 同一套规则）。
  * `parentPath` 为当前子树相对基准（"" 表示以 children 的直接父为根）。
  * 用于整理时按路径搬回节点 content。
  */

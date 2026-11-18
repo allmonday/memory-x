@@ -12,7 +12,7 @@
 flowchart TB
     subgraph EXT["pi 扩展 · @memory-x/pi-extension"]
         direction LR
-        TOOLS["工具面<br/>read · search · upsert · write_note<br/>move · apply_outline · delete · stats · propose"]
+        TOOLS["工具面<br/>read · search · upsert · update · write_note<br/>move · delete · summary · propose · stats"]
         INJ["注入（双 section · 差分对齐）<br/>memory 目录 + 规则（稳定，变更才补发）<br/>memory_recall 本轮相关记忆（话题切换才换）"]
     end
 
@@ -25,13 +25,13 @@ flowchart TB
     subgraph CORE["核心库 · @memory-x/core"]
         direction LR
         TREE["树语义<br/>路径寻址 · [n] 消歧<br/>编辑距离容错 · 幂等 upsert"]
-        RESTRUCT["applyOutline 子树重构<br/>applyTree 整树替换（整理）<br/>LCS 行级 diff（整理方案审阅）"]
+        RESTRUCT["applyOps 结构化批量操作（tidy 落盘）<br/>逐操作打补丁 · 未提及节点不变<br/>previewOps 先审后落盘"]
     end
 
     subgraph STORE["存储 · B 案单文件真相源"]
         direction LR
-        DB["真相源 .memory/memory.db<br/>nodes / leaves（物化 path 链路 + content 正文）<br/>WAL 事务 + O_EXCL 文件锁"]
-        REV["版本历史 revisions<br/>整树快照 change log · 保留 500 版<br/>回滚 = 落新版本（历史不改写 · 可前滚）"]
+        DB["真相源 .memory/memory.db<br/>nodes（uid 稳定标识 + 物化 path 链路 + content） / leaves<br/>WAL 事务 + O_EXCL 文件锁"]
+        REV["版本历史 revisions（时间线元数据，无树内容）<br/>+ changes（逐节点 undo log · 存变更前状态）<br/>物化任意版本 = 逆推 undo · 回滚 = 落新版本（可前滚）"]
     end
 
     EXT -->|"search 检索"| RET
@@ -43,8 +43,9 @@ flowchart TB
 ```
 
 - **读路径**：`search` → 派生索引（FTS5 ∪ LIKE，bm25 + 信号加成）→ 回读树拿到完整链路与片段 → 注入 `memory_recall`。
-- **写路径**：`upsert` / `write_note` / `apply_outline` → core 树语义与幂等校验 → 原子落盘（WAL + 文件锁）→ 派生索引增量更新，旧树另存为 revisions 快照。
-- **可回滚**：任何写都落新版本、不改写历史，`/memory rollback <id>` 只是再落一版，因此可前滚。
+- **写路径**：`upsert` / `update` / `write_note` / `move` / `delete`，以及整理 `tidy`（一批结构化 ops 一次落盘）→ core 树语义与逐操作校验 → 原子落盘（WAL + 文件锁），同时把每个被触碰节点的**变更前状态**按稳定 `uid` 追加到 `changes`（undo log）→ 派生索引增量更新。
+- **整理（tidy）**：模型读记忆树（Markdown 只作只读 review 视图）→ 调 `memory_propose(ops)` 提交**结构化操作列表**（`add_leaf`/`update_leaf`/`remove_leaf`/`rename`/`move`/`add_node`/`delete`/`set_note`/`set_summary`）→ `tidy show` 对克隆树预演并展示结构差异 → `tidy apply` 按序原子应用（任一条失败整批回滚）。不重写整棵树，未提及的节点保持不变。
+- **可回滚**：任意版本由「当前态 + 逆推 `revision_id > target` 的 undo 行」物化；`/memory rollback <id>` 只是再落一版，不改写历史，因此可前滚。`/memory changes` 的逐条变更由 undo 行 + 物化态**派生**，不另占存储。
 
 ## 快速开始
 
@@ -67,7 +68,7 @@ pi -e <clone路径>/packages/pi-extension/index.ts
 
 ```
 /memory                    # 看记忆目录
-/memory tidy               # 整理（做梦）：弹树选范围（节点=局部 / 整棵树=全局）→ 模型出方案草稿 → show 看 diff → apply 确认落盘
+/memory tidy               # 整理（做梦）：弹树选范围（节点=局部 / 整棵树=全局）→ 模型出结构化操作草稿（ops）→ show 预演 → apply 确认落盘
 /memory tidy <节点路径>     # 直接指定局部整理范围（懒得打路径可无参弹树选择）
 /memory tidy [<路径>] -- <指导语>  # 追加整理指导（注入整理 prompt，如"合并重复，保留最近3个月"）
 /memory tidy show|apply|discard

@@ -90,20 +90,12 @@ test("持久化：重开库后摘要仍在（含 hash）", async () => {
   assert.equal(mf2.getSummary("工作/甲"), "手写摘要");
 });
 
-test("applyOutline 按路径保留子节点摘要", async () => {
+test("applyOps：set_summary 写摘要，无关节点不受影响", async () => {
   const mf = await file();
   await mf.upsertNode("工作/子", "事实");
-  await mf.writeSummary("工作/子", "子摘要");
-  await mf.applyOutline("工作", "### 子\n- 事实\n\n### 新增\n- x");
+  await mf.upsertNode("工作/甲", "别的");
+  await mf.applyOps([{ op: "set_summary", path: "工作/子", summary: "子摘要" }]);
   assert.equal(mf.getSummary("工作/子"), "子摘要");
-});
-
-test("applyTree 按路径保留未变顶层节点的摘要", async () => {
-  const mf = await file();
-  await mf.upsertNode("工作/甲", "事实");
-  await mf.writeSummary("工作", "工作域摘要");
-  await mf.applyTree("## 工作\n### 甲\n- 事实\n\n## 生活\n- 体检");
-  assert.equal(mf.getSummary("工作"), "工作域摘要", "结构与内容未变 → 摘要仍有效");
 });
 
 test("restoreRevision 恢复摘要", async () => {

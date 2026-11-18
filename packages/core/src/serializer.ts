@@ -21,8 +21,7 @@ export function serializeSubtree(node: MemoryNode, level = 2): string {
 
 /**
  * 序列化节点的「内容大纲」（叶子 + 子节点），**不含节点自身标题、不含 content**。
- * 与 parseFragment / applyOutline 的输入形状对齐：首个标题前的列表项归该节点自身。
- * 用于局部整理（tidy）的素材与 diff——content 由 applyOutline 原样保留，不进 outline。
+ * 只作只读 review 视图：局部整理（tidy）时给模型看的素材——content 不进 outline。
  */
 export function serializeOutline(node: MemoryNode): string {
   const out: string[] = [];

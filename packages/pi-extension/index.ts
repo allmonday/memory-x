@@ -2,7 +2,7 @@
  * Memory X — pi 扩展（M1：手动写入闭环）
  *
  * 功能：
- * - 5 个工具：memory_read / memory_upsert / memory_move / memory_apply_outline / memory_stats
+ * - 工具：read / upsert / update / write_note / summary / move / delete / search / evidence / propose / stats
  * - before_agent_start：system prompt 注入记忆目录摘要（<memory> section，渐进披露）
  * - /memory 命令：查看目录与状态
  *
@@ -17,16 +17,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   MemoryFile,
-  diffLines,
-  diffStats,
+  TREE_OP_NAMES,
+  diffToChangeRows,
   dumpTree,
   enumerateNodePaths,
-  formatDiff,
   lintTree,
-  parseFragment,
   serializeMarkdown,
   serializeOutline,
   tocDigest,
+  type TreeOp,
 } from "../core/src/index.ts";
 
 const MEMORY_DIR = process.env.MEMORY_X_DIR || join(homedir(), "memory-x", "memory");
@@ -83,11 +82,11 @@ function clampEpisodeText(s: string): string {
 
 // ---------- 整理（做梦）模式状态 ----------
 let tidyMode = false;
-let tidyDraft: { outline: string; createdAt: string } | null = null;
+let tidyDraft: { ops: TreeOp[]; summary?: string; createdAt: string } | null = null;
 /** 整理作用域：null=整棵树（全局），否则为目标节点路径（局部整理） */
 let tidyScope: string | null = null;
 
-const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_update", "memory_write_note", "memory_summary", "memory_link_evidence", "memory_move", "memory_delete", "memory_apply_outline"]);
+const TIDY_WRITE_TOOLS = new Set(["memory_upsert", "memory_update", "memory_write_note", "memory_summary", "memory_link_evidence", "memory_move", "memory_delete"]);
 
 /** 整理模式下拦截写工具：方案只能走 memory_propose 草稿，确认后才落盘 */
 function gateTidyWrites(pi: any): void {
@@ -428,31 +427,6 @@ export default function memoryExtension(pi: any): void {
   });
 
   pi.registerTool({
-    name: "memory_apply_outline",
-    label: "重构记忆子树",
-    description:
-      "用一份 outline 整体替换目标节点的内容（叶子+子树）。outline 文法：标题行（##/###…，相对层级）+ 列表项，首个标题前的列表项归目标节点自身。适合结构性重构，改动大时优于多次 upsert",
-    parameters: {
-      type: "object",
-      properties: {
-        path: pathParam,
-        outline: { type: "string", description: "markdown outline 片段" },
-      },
-      required: ["path", "outline"],
-    },
-    async execute(_toolCallId: string, params: { path: string; outline: string }) {
-      const m = await memory();
-      try {
-        const r = await m.applyOutline(params.path, params.outline);
-        if (r.changed) invalidateToc();
-        return text(r.changed ? `已重构 ${r.path}（版本 #${r.revision}）` : `内容无变化：${r.path}`);
-      } catch (e) {
-        return text(`outline 应用失败：${(e as Error).message}`);
-      }
-    },
-  });
-
-  pi.registerTool({
     name: "memory_search",
     label: "搜记忆",
     description:
@@ -515,38 +489,57 @@ export default function memoryExtension(pi: any): void {
     name: "memory_propose",
     label: "提交整理方案",
     description:
-      "整理模式专用：提交整理方案（草稿，不落盘）。整树整理给完整新树（H2=顶层域）；局部整理给目标节点的新内容 outline。仅在收到[整理任务]时使用；用后提醒用户 /memory tidy show 查看与 /memory tidy apply 确认",
+      "整理模式专用：提交结构化的操作列表（草稿，不落盘）。仅在收到[整理任务]时使用；提交后提醒用户 /memory tidy show 查看、/memory tidy apply 确认",
     parameters: {
       type: "object",
       properties: {
-        outline: {
-          type: "string",
-          description: "整理后的方案 outline（整树：H2=顶层域；局部：目标节点的叶子+子节点，不含该节点标题）",
+        ops: {
+          type: "array",
+          description:
+            "结构化操作列表（按序应用）。op 与必填字段：add_leaf{path,leaf} / update_leaf{path,match,leaf} / remove_leaf{path,match} / rename{path,title} / move{from,to} / add_node{parent,title} / delete{path} / set_note{path,content} / set_summary{path,summary}。match 须为节点内**精确且唯一**的叶子原文。路径为物化规范路径。",
+          items: {
+            type: "object",
+            properties: {
+              op: { type: "string", enum: TREE_OP_NAMES as unknown as string[] },
+              path: { type: "string" },
+              leaf: { type: "string" },
+              match: { type: "string" },
+              title: { type: "string" },
+              from: { type: "string" },
+              to: { type: "string" },
+              parent: { type: "string" },
+              content: { type: "string" },
+              summary: { type: "string" },
+            },
+            required: ["op"],
+          },
         },
         summary: { type: "string", description: "一句话说明本次整理做了什么（给用户看）" },
       },
-      required: ["outline"],
+      required: ["ops"],
     },
-    async execute(_toolCallId: string, params: { outline: string; summary?: string }) {
-      // 干跑校验：能解析、规模合理，才收草稿
+    async execute(_toolCallId: string, params: { ops: TreeOp[]; summary?: string }) {
       try {
-        const frag = parseFragment(params.outline);
-        const count = (ns: any[]): number =>
-          ns.reduce((s: number, x: any) => s + 1 + x.leaves.length + count(x.children), 0);
-        let total: number;
-        if (tidyScope === null) {
-          // 整树整理：H2=顶层域，根下不允许列表项（与 applyTree 校验一致）
-          if (frag.leaves.length > 0) throw new Error("整树整理时根节点下不应有列表项（H2=顶层域）");
-          total = count(frag.children);
-          if (total > 3000) throw new Error(`整树方案过大（${total} > 3000 条目）`);
-        } else {
-          // 局部整理：叶子（归目标节点自身）+ 子节点，上限与 applyOutline 一致
-          total = frag.leaves.length + count(frag.children);
-          if (total > 300) throw new Error(`局部方案过大（${total} > 300 条目）——缩小范围或分批`);
+        if (!Array.isArray(params.ops) || params.ops.length === 0) throw new Error("ops 为空");
+        if (params.ops.length > 300) throw new Error(`操作过多（${params.ops.length} > 300）——缩小范围或分批`);
+        const m = await memory();
+        // 局部整理：路径必须落在目标子树内（防越界改动）
+        if (tidyScope !== null) {
+          const inScope = (p: string) => p === tidyScope || p.startsWith(`${tidyScope}/`);
+          const bad = params.ops.find((o) =>
+            Object.entries(o as Record<string, unknown>).some(
+              ([k, v]) => /^(path|from|to|parent)$/.test(k) && typeof v === "string" && !inScope(v),
+            ),
+          );
+          if (bad) throw new Error(`操作超出整理范围「${tidyScope}」：${JSON.stringify(bad)}`);
         }
-        tidyDraft = { outline: params.outline, createdAt: new Date().toISOString() };
+        // 干跑校验：全部操作能在克隆树上跑通，才收草稿
+        const preview = m.previewOps(params.ops);
+        if (!preview.ok) throw new Error(preview.error);
+        tidyDraft = { ops: params.ops, summary: params.summary, createdAt: new Date().toISOString() };
+        const rows = diffToChangeRows(preview.diff);
         return text(
-          `方案已收草稿（未落盘，${tidyScope === null ? "整棵树" : `节点「${tidyScope}」`}）：${total} 个条目。${params.summary ? `整理说明：${params.summary}\n` : ""}请提醒用户：/memory tidy show 查看 diff，/memory tidy apply 确认落盘，/memory tidy discard 丢弃`,
+          `方案已收草稿（未落盘，${tidyScope === null ? "整棵树" : `节点「${tidyScope}」`}）：${params.ops.length} 个操作，预计 ${rows.length} 处结构变化。${params.summary ? `整理说明：${params.summary}\n` : ""}请提醒用户：/memory tidy show 查看，/memory tidy apply 确认落盘，/memory tidy discard 丢弃`,
         );
       } catch (e) {
         return text(`方案校验失败（未收草稿）：${(e as Error).message}`);
@@ -589,7 +582,7 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；重构用 memory_apply_outline；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
       `写入规范：${WRITE_STYLE}`,
     ].join("\n");
 
@@ -800,22 +793,29 @@ export default function memoryExtension(pi: any): void {
             ctx.ui.notify("没有待审方案。先用 /memory tidy 发起整理", "error");
             return;
           }
-          const frag = parseFragment(tidyDraft.outline);
           const scopeLabel = tidyScope === null ? "整棵树" : `节点「${tidyScope}」`;
-          let before: string[];
-          let after: string[];
-          if (tidyScope === null) {
-            before = serializeMarkdown(m.root).split("\n");
-            after = serializeMarkdown({ title: "Memory", leaves: [], children: frag.children } as any).split("\n");
-          } else {
-            const sec = m.readSection(tidyScope);
-            before = (sec ? serializeOutline(sec.node) : "").split("\n");
-            after = serializeOutline({ title: "", leaves: frag.leaves, children: frag.children }).split("\n");
+          const opLines = tidyDraft.ops.map((o, i) => {
+            const { op, ...rest } = o as unknown as Record<string, unknown>;
+            const parts = Object.entries(rest)
+              .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+              .join(" ");
+            return `${i + 1}. ${op} ${parts}`;
+          });
+          const preview = m.previewOps(tidyDraft.ops);
+          if (!preview.ok) {
+            ctx.ui.notify(`方案校验未通过：${preview.error}\n\n操作列表：\n${opLines.join("\n")}`, "error");
+            return;
           }
-          const diff = diffLines(before, after);
-          const { added, removed } = diffStats(diff);
+          const rows = diffToChangeRows(preview.diff);
+          const changeLines = rows.map(
+            (r) => `${r.op} ${r.path}${r.to ? ` → ${r.to}` : r.from ? ` ← ${r.from}` : ""}`,
+          );
           ctx.ui.notify(
-            `方案草稿（${scopeLabel}，${tidyDraft.createdAt.slice(0, 16).replace("T", " ")}）：+${added} / -${removed} 行\n\n${formatDiff(diff)}\n\n确认：/memory tidy apply · 丢弃：/memory tidy discard`,
+            `方案草稿（${scopeLabel}，${tidyDraft.createdAt.slice(0, 16).replace("T", " ")}）：${tidyDraft.ops.length} 个操作，${rows.length} 处变化${
+              tidyDraft.summary ? `\n整理说明：${tidyDraft.summary}` : ""
+            }\n\n操作：\n${opLines.join("\n")}${
+              changeLines.length ? `\n\n结构变化：\n${changeLines.join("\n")}` : ""
+            }\n\n确认：/memory tidy apply · 丢弃：/memory tidy discard`,
             "info",
           );
           return;
@@ -826,13 +826,12 @@ export default function memoryExtension(pi: any): void {
             ctx.ui.notify("没有待审方案", "error");
             return;
           }
-          const scope = tidyScope;
-          const r = scope === null ? await m.applyTree(tidyDraft.outline) : await m.applyOutline(scope, tidyDraft.outline);
+          const scopeLabel = tidyScope === null ? "整棵树" : `节点「${tidyScope}」`;
+          const r = await m.applyOps(tidyDraft.ops);
           tidyMode = false;
           tidyDraft = null;
           tidyScope = null;
           invalidateToc();
-          const scopeLabel = scope === null ? "整棵树" : `节点「${scope}」`;
           ctx.ui.notify(
             r.ok ? `整理已落盘（${scopeLabel}，版本 #${r.revision}，不合适可 /memory rollback 回滚）` : `落盘失败：${r.path}`,
             "info",
@@ -849,7 +848,7 @@ export default function memoryExtension(pi: any): void {
         }
 
         if (scopeArg !== "") {
-          // 显式节点路径 → 局部整理（模糊解析后取规范路径，保证 applyOutline 精确命中）
+          // 显式节点路径 → 局部整理（模糊解析后取规范路径，保证结构化操作路径精确命中）
           const wantPath = scopeArg;
           const sec = m.readSection(wantPath);
           if (!sec) {
@@ -889,7 +888,9 @@ export default function memoryExtension(pi: any): void {
           ctx.ui.notify("暂无版本历史", "info");
           return;
         }
-        const lines = revs.map((r) => `#${r.id} [${r.created_at}] ${r.op}${r.path ? ` ${r.path}` : ""}`);
+        const lines = revs.map(
+          (r) => `#${r.id} [${r.createdAt}] ${r.op}${r.path ? ` ${r.path}` : ""}${r.detail ? ` · ${r.detail}` : ""}`,
+        );
         ctx.ui.notify(`版本历史（最近 ${revs.length} 条，回滚：/memory rollback <id>）：\n${lines.join("\n")}`, "info");
         return;
       }
@@ -954,7 +955,7 @@ const TIDY_GLOBAL_LABEL = "整棵树（全局整理）";
 
 interface NodeEntry {
   node: any;
-  /** 物化规范路径（重名兄弟带 [n] 消歧）——与 applyOutline 精确匹配对齐 */
+  /** 物化规范路径（重名兄弟带 [n] 消歧）——与结构化操作路径精确匹配对齐 */
   path: string;
   label: string;
 }
@@ -969,15 +970,19 @@ function enumerateNodes(root: any): NodeEntry[] {
   });
 }
 
-/** 树中是否存在带 content（完整信息）的节点——整树整理会丢 content，用于告警。 */
-function hasContent(node: any): boolean {
-  if (node.content != null) return true;
-  return node.children.some((c: any) => hasContent(c));
-}
+/** 结构化操作的说明段（全局/局部整理共用）。 */
+const OPS_GUIDE = [
+  "输出方式：调用 memory_propose，参数 ops 是按序应用的操作数组。可用操作：",
+  "  add_leaf{path,leaf} · update_leaf{path,match,leaf} · remove_leaf{path,match} · rename{path,title} · move{from,to} · add_node{parent,title} · delete{path} · set_note{path,content} · set_summary{path,summary}",
+  "规则：path/from/to/parent 用物化规范路径（重名兄弟带 [n]）；match 必须是节点内**精确且唯一**的叶子原文；rename 同层不得重名；一条一事；时间戳保留。",
+  "只做必要的改动——未在 ops 中提及的节点会原样保留，不会被重写。",
+  "【禁止调用其它写工具（upsert/update/move/delete/…）——它们在整理模式下被拦截】。",
+  "完成后调用 memory_propose 提交 ops + 一句话整理说明，然后告知用户 /memory tidy show 查看、/memory tidy apply 确认。",
+];
 
 /**
  * 发起整理：设置作用域与草稿状态，向模型投递 [整理任务]。
- * scope=null → 全局（整树）；否则 → 局部（该节点的叶子+子节点，content 保留）。
+ * scope=null → 全局（整树）；否则 → 局部（限定在该子树内）。
  * hint 非空时作为「用户附加指导」拼进整理任务 prompt。
  */
 async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null, hint: string | null = null): Promise<void> {
@@ -990,7 +995,7 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null,
       {
         customType: "memory-tidy",
         content: [
-          "[整理任务] 请分析下面的记忆树并给出整理后的完整新树方案。",
+          "[整理任务] 请分析下面的记忆树，给出**结构化操作列表**（不要重写整棵树）。",
           "整理目标：合并重复/分散的事实；理顺层级与命名；精简冗长叶子（保留要点，不丢信息）；剔除明显过期内容。",
           ...(lint.length > 0
             ? [
@@ -998,18 +1003,10 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null,
                 ...lint.map((i) => `- [${i.rule}] ${i.path || "(根)"}：${i.message}`),
               ]
             : []),
-          "约束：保持 markdown outline 文法（H2=顶层域，叶子一行一事）；不要新建过深层级（≤5）；时间戳保留。",
-          "【禁止调用任何写工具（upsert/move/delete/apply_outline）——它们在整理模式下被拦截】。",
-          "完成后调用 memory_propose 提交完整新树（outline 参数）+ 一句话整理说明，然后告知用户用 /memory tidy show 查看、/memory tidy apply 确认。",
+          ...OPS_GUIDE,
           ...(hint ? ["", "用户附加指导（请优先遵循）：", hint] : []),
-          ...(hasContent(m.root)
-            ? [
-                "",
-                "ℹ️ 说明：节点 content（完整信息）不在 outline 中表达；整树替换会按路径保留同路径节点的 content，改名/合并/移动的节点其 content 会丢失（如需保留这些节点的正文，改用局部整理，或先 /memory dump --full 备份）。",
-              ]
-            : []),
           "",
-          "当前记忆树全文：",
+          "当前记忆树全文（只读参考；改动请走 ops）：",
           "```",
           serializeMarkdown(m.root),
           "```",
@@ -1040,7 +1037,7 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null,
     {
       customType: "memory-tidy",
       content: [
-        `[整理任务] 请对记忆树中的节点「${scope}」做局部整理，给出该节点的新内容方案。`,
+        `[整理任务] 请对记忆树中的节点「${scope}」做局部整理，给出**结构化操作列表**。`,
         "整理目标：合并重复/分散的事实；理顺层级与命名；精简冗长叶子（保留要点，不丢信息）；剔除明显过期内容。",
         ...(lint.length > 0
           ? [
@@ -1049,14 +1046,12 @@ async function beginTidy(pi: any, m: MemoryFile, ctx: any, scope: string | null,
             ]
           : []),
         "范围约束：",
-        "- 只重写该节点的叶子与其子节点（子树）；树的其它部分一律不要改动。",
-        "- 该节点的 content（完整信息/RAG 语料）不参与结构整理，会原样保留——方案中不要出现 fenced 代码块。",
-        "- 方案文法：列表项（- …）＝该节点自身的叶子（须排在第一个标题前）；## / ### ＝其子节点层级；不要输出该节点自己的标题行。",
-        "【禁止调用任何写工具（upsert/move/delete/apply_outline）——它们在整理模式下被拦截】。",
-        "完成后调用 memory_propose 提交该节点的新内容 outline + 一句话整理说明，然后告知用户 /memory tidy show 查看、/memory tidy apply 确认。",
+        `- 只能改动该节点及其子树：所有 path / from / to / parent 必须以「${scope}」或其子路径开头。`,
+        "- 该节点的 content（完整信息/RAG 语料）默认不要动（确有必要时才用 set_note）。",
+        ...OPS_GUIDE,
         ...(hint ? ["", "用户附加指导（请优先遵循）：", hint] : []),
         "",
-        `当前节点「${scope}」的内容（叶子 + 子节点，不含节点标题）：`,
+        `当前节点「${scope}」的内容（叶子 + 子节点，只读参考）：`,
         "```",
         serializeOutline(node),
         "```",

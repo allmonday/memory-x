@@ -1,5 +1,7 @@
 /** 记忆树节点。根节点 title 固定为 "Memory"，只有 children，没有 leaves。 */
 export interface MemoryNode {
+  /** 跨版本稳定标识（内部寻址用；不参与 Markdown 序列化，不进 outline 协议） */
+  uid?: string;
   title: string;
   /** 标题下的叶子事实（bullet 行，不含 "- " 前缀） */
   leaves: string[];

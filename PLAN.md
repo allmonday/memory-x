@@ -23,9 +23,9 @@
 
 | # | 原则 | 推论 |
 |---|---|---|
-| P1 | **SQLite 是唯一真相（nodes + revisions）**（D6→D7 演进） | 无镜像无 git；版本历史/回滚在 revisions 表；索引/缓存全部可删重建 |
+| P1 | **SQLite 是唯一真相（nodes + revisions + changes）**（D6→D7 演进） | 无镜像无 git；版本时间线与 undo log 在库内；索引/缓存全部可删重建 |
 | P2 | **渐进披露** | 常驻注入只有小目录摘要，细节靠工具按需取 |
-| P3 | **版本历史在库内**（revisions 整树快照，MAX 500） | 移植 MindMap X 语义：回滚是前进（新版本），历史不改写，可前滚 |
+| P3 | **版本历史在库内**（revisions 时间线 + changes 逐节点 undo log，MAX 500，无整树快照） | 移植 MindMap X MVCC 语义：任意版本由当前态逆推 undo 物化；回滚是前进（新版本），历史不改写，可前滚 |
 | P4 | **抽取宁缺毋滥** | 垃圾条目烂树；precision 优先于 recall |
 | P5 | **单人系统单人信号** | 访问频率、最近使用是免费排序信号，用起来 |
 
@@ -41,28 +41,28 @@ flowchart TB
     subgraph SESSION["日常 pi 会话（CLI / 任意 SDK 宿主）"]
         subgraph EXT["pi 扩展 · @memory-x/pi-extension（进程内）"]
             direction LR
-            TOOLS["tools<br/>read · search · upsert · write_note · move<br/>apply_outline · delete · stats · propose"]
+            TOOLS["tools<br/>read · search · upsert · update · write_note · move<br/>delete · summary · propose · stats"]
             HOOKS["hooks（已实现）<br/>before_agent_start → 目录摘要 + 本轮自动召回注入<br/>tool_call → 整理模式下拦截写工具<br/><br/>计划中（M2）<br/>turn_end → 抽取候选队列<br/>agent_before_settle / agent_settled → codemode 判断 + 写树<br/>session_before_compact → 归档压缩内容"]
             PROMPT["system prompt section<br/>目录 + 使用策略（渐进披露）"]
         end
         subgraph CORE["核心库 · @memory-x/core（纯 TS · 零运行时依赖）"]
             direction LR
             CORE_PARSE["parser · serializer · path · ops<br/>文法解析（往返稳定）<br/>路径寻址 + [n] 消歧 · upsert / move / delete"]
-            CORE_STORE["store · lock · memory-file<br/>SQLite 原子写（WAL + O_EXCL 文件锁）<br/>revisions 快照与回滚"]
-            CORE_DERIVE["digest · fragment · lint · diff<br/>目录摘要 / applyOutline 子树重构<br/>巡检 / LCS 行级 diff"]
+            CORE_STORE["store · lock · memory-file<br/>SQLite 原子写（WAL + O_EXCL 文件锁）<br/>revisions 时间线 + changes undo log · 物化与回滚"]
+            CORE_DERIVE["digest · ops-batch · lint · diff<br/>目录摘要 / applyOps 结构化批量操作<br/>巡检 / 结构 diff"]
         end
     end
 
     subgraph STORE["存储 · B 案单文件真相源（D6→D7）"]
         direction LR
-        DB[".memory/memory.db<br/>nodes / leaves<br/>物化 path 链路 + content 正文"]
-        REV["revisions<br/>整树快照 change log · MAX 500<br/>回滚 = 落新版本（历史不改写 · 可前滚）"]
+        DB[".memory/memory.db<br/>nodes（uid + 物化 path） / leaves<br/>content 正文"]
+        REV["revisions 时间线 + changes 逐节点 undo log · MAX 500<br/>物化任意版本 = 逆推 undo<br/>回滚 = 落新版本（历史不改写 · 可前滚）"]
         IDX["派生索引<br/>FTS5 trigram ∪ LIKE →（后期）向量 → RRF 融合<br/>可随时删库重建"]
     end
 
     EXT -->|"工具调用（进程内直调 · 无服务 / 端口 / 协议）"| CORE
     CORE -->|"原子写"| DB
-    CORE -->|"每次写落快照"| REV
+    CORE -->|"每次写落 undo 行"| REV
     IDX -. "派生 / 重建" .-> DB
 ```
 
@@ -133,7 +133,7 @@ class MemoryFile {
   upsertNode(path: string, leaf: string): OpResult;
   moveNode(from: string, to: string): OpResult;
   deleteNode(path: string): OpResult;
-  applyOutline(path: string, outline: string): OpResult;  // 粗粒度整子树重写
+  applyOps(ops: TreeOp[]): OpResult;  // 结构化批量操作（tidy 落盘；逐操作、原子、可回滚）
   writeNote(path: string, content: string): OpResult;
 
   // 检索（分层，见 §5）
@@ -162,10 +162,10 @@ interface OpResult { ok: boolean; path: string; revision: string; /* git sha */ 
 | `memory_read` | `path` | 读子树（含 notes 链接） | 只读，自动放行 |
 | `memory_search` | `query` | 分层检索，top-5 路径+摘要 | 只读，自动放行 |
 | `memory_upsert` | `path, leaf` | 新增/更新一条叶子事实 | 默认放行（git 兜底），可配置确认 |
-| `memory_apply_outline` | `path, outline` | 整子树重写（大重构用） | 默认需确认（beforeTool hook） |
+| `memory_propose` | `ops[], summary` | 整理模式：提交结构化操作草稿（不落盘） | 仅整理模式放行 |
 | `memory_move` | `from, to` | 移动子树 | 默认需确认 |
 
-配置（pi settings）：`autoExtract`（默认 on）、`writeConfirm`（upsert 默认 off / apply_outline+move 默认 on）、`tocMaxTokens`（默认 400）、`searchTopK`（默认 5）。
+配置（pi settings）：`autoExtract`（默认 on）、`writeConfirm`（upsert 默认 off / move 默认 on）、`tocMaxTokens`（默认 400）、`searchTopK`（默认 5）。
 
 ### 4.2 Hook 接线
 

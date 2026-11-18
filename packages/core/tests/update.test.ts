@@ -33,15 +33,6 @@ test("updateNode：match 未命中则不改动（ok=false）", async () => {
   assert.deepEqual(mf.readSection("工作/prefs")!.node.leaves, ["数据库用 SQLite"]);
 });
 
-test("updateNode：同文案出现多次（非唯一）则拒绝，防误替换", async () => {
-  const mf = await fresh();
-  await mf.applyOutline("工作", "- 重复条目\n- 重复条目\n");
-  const r = await mf.updateNode("工作", "重复条目", "改过的条目");
-  assert.equal(r.ok, false);
-  assert.equal(r.changed, false);
-  assert.deepEqual(mf.readSection("工作")!.node.leaves, ["重复条目", "重复条目"]);
-});
-
 test("updateNode：不动节点 content", async () => {
   const mf = await fresh();
   await mf.upsertNode("工作/调研", "阶段=进行中");

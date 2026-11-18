@@ -140,7 +140,7 @@ function toJson(root: MemoryNode): NodeJson[] {
 
 async function revisionMarkdown(store: MemoryStore, id: number): Promise<string> {
   if (id < 1) return "# Memory\n";
-  const tree = store.getRevisionTree(id);
+  const tree = store.materializeTree(id);
   return tree ? serializeMarkdown(tree) : "# Memory\n";
 }
 
