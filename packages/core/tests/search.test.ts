@@ -126,3 +126,12 @@ test("写入后索引自动刷新（新内容可搜）", async () => {
   const hits = mf.search("函数计算");
   assert.equal(hits[0]!.path, "项目/新项目");
 });
+
+test("检索不把根节点当命中（根标题 'Memory' 不再污染结果）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mx-search-root-"));
+  const mf = await MemoryFile.open(dir);
+  await mf.upsertNode("工作/调研", "Memory 管理策略"); // 含 memory 的真节点
+  const hits = mf.search("memory");
+  assert.ok(hits.some((h) => h.path === "工作/调研"), "真节点应命中");
+  assert.ok(hits.every((h) => h.path !== ""), "不应返回根节点空路径");
+});

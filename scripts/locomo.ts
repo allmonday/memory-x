@@ -101,7 +101,7 @@ async function main(): Promise<void> {
       const rank = hits.findIndex((h) => gold.has(h.path));
       const row: Row = { conv: c.sample_id, q: q.question, cat: q.category, rank };
       if (llm && EVAL_CATEGORIES.has(q.category)) {
-        const memories = hits.map((h) => mf.renderSection(h.path) ?? "").join("\n\n---\n\n");
+        const memories = hits.filter((h) => h.path).map((h) => mf.renderSection(h.path) ?? "").join("\n\n---\n\n");
         row.pred = (await llm.chat(ANSWER_SYSTEM, answerUser(memories, q.question))).trim();
         const verdict = await llm.chat(JUDGE_SYSTEM, judgeUser(q.question, q.answer, row.pred));
         row.correct = isCorrect(verdict);

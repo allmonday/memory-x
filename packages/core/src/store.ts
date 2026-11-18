@@ -323,6 +323,7 @@ export class MemoryStore {
           COALESCE((SELECT group_concat(l.text, ' ') FROM leaves l WHERE l.node_id = n.id), '')
           || ' ' || COALESCE(n.content, '')
         FROM nodes n
+        WHERE n.path != ''
       `);
       this.db.exec("COMMIT");
     } catch (e) {
@@ -372,7 +373,7 @@ export class MemoryStore {
         .prepare(
           `SELECT path, title,
              snippet(memory_fts, 2, '«', '»', '…', 16) AS snip, rank
-           FROM memory_fts WHERE memory_fts MATCH ?
+           FROM memory_fts WHERE memory_fts MATCH ? AND path != ''
            ORDER BY rank LIMIT ?`,
         )
         .all(ftsTerms.join(" OR "), Math.max(topK * 2, 10)) as Array<{
@@ -393,7 +394,7 @@ export class MemoryStore {
           .prepare(
             `SELECT DISTINCT n.path, n.title, n.content FROM nodes n
              LEFT JOIN leaves l ON l.node_id = n.id
-             WHERE n.title LIKE ? ESCAPE ' ' OR n.content LIKE ? ESCAPE ' ' OR l.text LIKE ? ESCAPE ' '
+             WHERE n.path != '' AND (n.title LIKE ? ESCAPE ' ' OR n.content LIKE ? ESCAPE ' ' OR l.text LIKE ? ESCAPE ' ')
              LIMIT 50`,
           )
           .all(pat, pat, pat) as Array<{ path: string; title: string; content: string | null }>;
