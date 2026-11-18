@@ -53,6 +53,8 @@ const LLM_INGEST = flag("llm-ingest") || (WITH_ANSWER && !flag("raw-ingest"));
 const INGEST_MAX_TOKENS = Number(arg("ingest-max-tokens") ?? "8000");
 /** 证据覆盖判定的内容词重叠阈值（0-1） */
 const COVER_MIN = Number(arg("cover-min") ?? "0.7");
+/** 分支融合策略：none | raw-first | raw-only | interleave（LLM 建树时默认 raw-first） */
+const FUSION = arg("fusion") ?? (LLM_INGEST ? "raw-first" : "none");
 
 const RUN_DIR = resolve("eval/locomo/runs", new Date().toISOString().replace(/[:.]/g, "-"));
 
@@ -72,6 +74,36 @@ function covered(evidenceText: string, contextWords: Set<string>): boolean {
   let hit = 0;
   for (const w of new Set(ev)) if (contextWords.has(w)) hit++;
   return hit / new Set(ev).size >= COVER_MIN;
+}
+
+interface Hit {
+  path: string;
+}
+
+/**
+ * 分支融合：结构化节点短且关键词密集，bm25 会把它们顶到原文前面。
+ * 因此检索时先取更大的候选池，再按策略让原文优先。
+ *   raw-first  —— 原文全部在前，结构化追加在后（默认，不伤召回）
+ *   raw-only   —— 只用原文分支
+ *   interleave —— 原文/结构化交替
+ */
+function fuse(pool: Hit[], topK: number): Hit[] {
+  if (FUSION === "none") return pool.slice(0, topK);
+  const raw = pool.filter((h) => h.path.startsWith("原文/"));
+  const str = pool.filter((h) => h.path.startsWith("结构化/"));
+  let out: Hit[];
+  if (FUSION === "raw-only") {
+    out = raw;
+  } else if (FUSION === "interleave") {
+    out = [];
+    for (let i = 0; i < Math.max(raw.length, str.length); i++) {
+      if (raw[i]) out.push(raw[i]!);
+      if (str[i]) out.push(str[i]!);
+    }
+  } else {
+    out = [...raw, ...str];
+  }
+  return out.slice(0, topK);
 }
 
 interface Row {
@@ -140,7 +172,8 @@ async function main(): Promise<void> {
 
     const idx = turnTextIndex(c);
     for (const q of qas) {
-      const hits = mf.search(q.question, TOP_K);
+      const pool = mf.search(q.question, FUSION === "none" ? TOP_K : Math.max(TOP_K * 10, 50));
+      const hits = fuse(pool, TOP_K);
       // 逐级累积上下文，找覆盖全部证据的最小 k
       const ctxWords = new Set<string>();
       let coverRank = -1;
