@@ -54,8 +54,9 @@ for (const q of questions) {
   if (ok3) hit3++;
   mrr += rank >= 0 ? 1 / (rank + 1) : 0;
   if (!ok3) misses.push({ ...q, got: hits.map((h) => h.path) });
+  const sc = rank >= 0 ? hits[rank]!.score.toFixed(2) : "-";
   console.log(
-    `${ok3 ? (ok1 ? "●" : "◐") : "○"} [${q.type.padEnd(10)}] ${q.query} → ${rank >= 0 ? `#${rank + 1}` : "MISS"}`,
+    `${ok3 ? (ok1 ? "●" : "◐") : "○"} [${q.type.padEnd(10)}] ${q.query} → ${rank >= 0 ? `#${rank + 1} (${sc})` : "MISS"}`,
   );
 }
 

@@ -95,6 +95,31 @@ test("旧库（无 FTS 数据）打开时自动补建索引", async () => {
   assert.equal(hits.length, 1);
 });
 
+test("停用词：纯虚词查询返回空，不进 LIKE 兜底", async () => {
+  const { mf } = await seeded();
+  assert.equal(mf.search("什么 怎么").length, 0);
+  assert.equal(mf.search("帮我看看").length, 0);
+  assert.equal(mf.search("the a of").length, 0);
+});
+
+test("信号加成：高频访问的节点排序上升", async () => {
+  const dir = (await seeded()).dir;
+  const mf = await MemoryFile.open(dir);
+  // 两个节点都含「调研」，给 工作方向 大量访问信号
+  await mf.upsertNode("工作方向", "主题：儿童识字调研");
+  for (let i = 0; i < 10; i++) mf.recordAccess("工作方向");
+  const hits = mf.search("调研");
+  assert.ok(hits.length >= 2);
+  assert.equal(hits[0]!.path, "工作方向", "访问频次应提升排序");
+  assert.ok(hits[0]!.score > hits[1]!.score);
+});
+
+test("SearchHit 携带 score 字段", async () => {
+  const { mf } = await seeded();
+  const h = mf.search("生态调研")[0]!;
+  assert.ok(typeof h.score === "number" && h.score > 0);
+});
+
 test("写入后索引自动刷新（新内容可搜）", async () => {
   const { mf } = await seeded();
   await mf.upsertNode("项目/新项目", "火山引擎函数计算调研");

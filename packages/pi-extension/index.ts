@@ -23,6 +23,8 @@ import {
 const MEMORY_DIR = process.env.MEMORY_X_DIR || join(homedir(), "memory-x", "memory");
 const SECTION_MAX_CHARS = 1600;
 const READ_MAX_CHARS = 6000;
+/** 自动召回注入阈值：综合分低于此不注入（减噪；MEMORY_X_INJECT_MIN 可调） */
+const AUTO_INJECT_MIN_SCORE = Number(process.env.MEMORY_X_INJECT_MIN ?? "1.0");
 
 let cache: MemoryFile | null = null;
 
@@ -236,11 +238,11 @@ export default function memoryExtension(pi: any): void {
       "- 不确定路径时先读目录或用更浅路径试探，避免盲写",
     ];
 
-    // 自动召回：用户输入 → FTS top-3 → 追加「相关记忆」段（零工具调用的兑底）
+    // 自动召回：用户输入 → 检索 top-3（分数闸门过滤）→ 追加「相关记忆」段
     if (event.messageType === "user" && typeof event.prompt === "string" && event.prompt.length >= 2) {
       try {
         const m = await memory();
-        const hits = m.search(event.prompt, 3);
+        const hits = m.search(event.prompt, 3).filter((h) => h.score >= AUTO_INJECT_MIN_SCORE);
         if (hits.length > 0) {
           const lines = hits.map((h) => {
             const chain = [...h.ancestors, h.title].join(" › ");

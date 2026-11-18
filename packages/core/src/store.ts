@@ -3,6 +3,22 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryNode } from "./types.ts";
 
+/** 停用词：高频虚词/疑问代词——尤其是双字词会经 LIKE 兜底匹配一切，必须过滤 */
+const STOPWORDS = new Set([
+  // 中文虚词/疑问词（2-4 字）
+  "什么", "怎么", "怎么样", "为什么", "是什么", "什么样", "哪些", "哪个", "哪里",
+  "可以", "应该", "可能", "这个", "那个", "这些", "那些", "然后", "但是", "因为",
+  "所以", "如果", "还有", "没有", "已经", "现在", "时候", "东西", "地方",
+  "我们", "你们", "他们", "一下", "一些", "关于", "请问", "帮我", "告诉",
+  "我的", "你的", "他的", "就是", "还是", "以及", "或者", "不是", "一个",
+  "之前", "之后", "最近", "上次", "需要", "想看", "看看", "说一下", "有哪些",
+  // 英文常用虚词
+  "the", "a", "an", "is", "are", "was", "what", "how", "why", "when", "who",
+  "can", "could", "should", "would", "do", "does", "did", "my", "your", "his",
+  "this", "that", "then", "about", "from", "with", "for", "and", "but", "not",
+  "me", "you", "it", "of", "to", "in", "on",
+]);
+
 export const STORE_DIR = ".memory";
 export const DB_FILE = "memory.db";
 
@@ -66,6 +82,8 @@ export interface SearchHit {
   hasContent: boolean;
   leafCount: number;
   via: "fts" | "like";
+  /** 综合分（合入检索分 + 访问/新鲜度加成），越高越前 */
+  score: number;
 }
 
 /**
@@ -219,11 +237,13 @@ export class MemoryStore {
   }
 
   /**
-   * 检索：FTS5 trigram（≥3 字词，bm25 排序 + snippet）∪ LIKE 兜底（2 字短词，中文常见）。
+   * 检索：FTS5 trigram（≥3 字词，bm25 排序 + snippet）∪ LIKE 兜底（2 字短词）。
+   * 排序 = 检索分 × 访问频次加成 × 新鲜度加成（P5：用得多的记忆更易被召回）。
    * 返回带完整链路/祖先/兄弟/命中片段的富化结果。
    */
   search(query: string, topK = 5): SearchHit[] {
-    const tokens = query.match(/[\p{L}\p{N}]+/gu) ?? [];
+    const tokens = (query.match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => !STOPWORDS.has(t.toLowerCase()));
+    if (tokens.length === 0) return [];
     // CJK 长词滑窗拆分：整句子串匹配召回过低（"我最喜欢的科学家是谁" 匹配不到含"科学家"的文档）。
     // 拆成重叠 trigram OR 连接，bm25 排序压制噪音。
     const expand = (t: string): string[] => {
@@ -290,11 +310,39 @@ export class MemoryStore {
       }
     }
 
-    const ordered = [...seen.values()].sort((a, b) => a.rank - b.rank).slice(0, topK);
-    return ordered.map((h) => this.enrich(h));
+    const ordered = [...seen.values()].sort((a, b) => a.rank - b.rank);
+    // 信号加成：访问频次（log）+ 新鲜度（30 天线性衰减，仅命中过才算）
+    const accessRows = this.db
+      .prepare(`SELECT path, hits, last_hit FROM access WHERE ${
+        [...seen.keys()].map(() => "path = ?").join(" OR ") || "0"
+      }`)
+      .all(...seen.keys()) as Array<{ path: string; hits: number; last_hit: number }>;
+    const accessByPath = new Map(accessRows.map((r) => [r.path, r]));
+    const now = Date.now();
+    const scored = ordered.map((h) => {
+      const base = h.via === "fts" ? Math.max(0.01, -h.rank) : 0.5; // like 兜底给固定低底分
+      const acc = accessByPath.get(h.path);
+      let mult = 1;
+      if (acc) {
+        mult *= 1 + 0.5 * Math.log2(1 + acc.hits); // 2 次命中 +50%，8 次 +200%
+        const daysSince = (now - acc.last_hit) / 86_400_000;
+        if (daysSince < 30) mult *= 1 + 0.3 * (1 - daysSince / 30); // 近期用过再 +最多30%
+      }
+      return { ...h, score: Number((base * mult).toFixed(4)) };
+    });
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map((h) => this.enrich(h));
   }
 
-  private enrich(h: { path: string; title: string; snippet: string | null; via: "fts" | "like" }): SearchHit {
+  private enrich(h: {
+    path: string;
+    title: string;
+    snippet: string | null;
+    via: "fts" | "like";
+    score?: number;
+  }): SearchHit {
     const segs = h.path.split("/");
     const parentPath = segs.length > 1 ? segs.slice(0, -1).join("/") : null;
     let siblings: string[] = [];
@@ -331,6 +379,7 @@ export class MemoryStore {
       hasContent,
       leafCount,
       via: h.via,
+      score: h.score ?? 0,
     };
   }
 
