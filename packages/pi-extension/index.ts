@@ -537,7 +537,7 @@ export default function memoryExtension(pi: any): void {
         const preview = m.previewOps(params.ops);
         if (!preview.ok) throw new Error(preview.error);
         const rows = diffToChangeRows(preview.diff);
-        const prevId = m.listRevisions(2)[1]?.id;
+        const prevId = m.listRevisions(1)[0]?.id; // 落盘前的当前版本＝本次 tidy 的回滚目标
         // 直接落盘：整批一个版本
         const r = await m.applyOps(params.ops, params.summary);
         tidyMode = false;
