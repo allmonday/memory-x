@@ -53,3 +53,20 @@ test("applyTree：根下带列表项拒绝", async () => {
   const mf = await MemoryFile.open(dir);
   await assert.rejects(() => mf.applyTree("- 不允许\n## 域\n"), /根节点下不应有列表项/);
 });
+
+test("applyTree：按路径保留节点 content（整树整理不丢完整信息）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mx-tidy-content-"));
+  const mf = await MemoryFile.open(dir);
+  await mf.upsertNode("工作/调研", "事实A");
+  await mf.writeNote("工作/调研", "调研完整正文");
+  await mf.upsertNode("生活", "体检");
+
+  // 同路径节点（即使叶子被重写）content 应保留
+  await mf.applyTree("## 工作\n### 调研\n- 事实A（合并）\n\n## 生活\n- 体检\n");
+  assert.equal(mf.readNote("工作/调研"), "调研完整正文");
+  assert.deepEqual(mf.readSection("工作/调研")!.node.leaves, ["事实A（合并）"]);
+
+  // 改名/路径变化的节点无法映射，content 丢失（明确记录该行为）
+  await mf.applyTree("## 工作\n### 调研改名\n- 事实A（合并）\n\n## 生活\n- 体检\n");
+  assert.equal(mf.readNote("工作/调研改名"), null);
+});

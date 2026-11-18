@@ -14,6 +14,26 @@ export const MEMORY_FILE = "MEMORY.md";
 const EMPTY_DOC = "# Memory\n";
 
 /**
+ * 按物化路径（重名兄弟 [n] 消歧，与 store.saveTree 同一套规则）遍历子树。
+ * 用于整树替换时按路径搬回 content。
+ */
+function forEachWithPath(
+  children: MemoryNode[],
+  parentPath: string,
+  fn: (node: MemoryNode, path: string) => void,
+): void {
+  const counts = new Map<string, number>();
+  for (const child of children) {
+    const seen = (counts.get(child.title) ?? 0) + 1;
+    counts.set(child.title, seen);
+    const seg = seen > 1 ? `${child.title}[${seen}]` : child.title;
+    const path = parentPath ? `${parentPath}/${seg}` : seg;
+    fn(child, path);
+    forEachWithPath(child.children, path, fn);
+  }
+}
+
+/**
  * 记忆文件对象（B 案存储 + 版本历史）：
  *
  *   真相源   .memory/memory.db（nodes 表 + revisions 变更日志）
@@ -150,6 +170,16 @@ export class MemoryFile {
     if (count(frag.children) > 3000) {
       throw new Error("整树方案过大（>3000 条目）");
     }
+    // content（fenced RAG 语料）不在 outline 中表达：按物化路径把旧树 content 迁回同路径节点。
+    // 改名/合并/移动导致路径变化的节点，content 无法自动映射（会丢失）；同路径节点完整保留。
+    const savedContent = new Map<string, string>();
+    forEachWithPath(this.root.children, "", (node, path) => {
+      if (node.content != null) savedContent.set(path, node.content);
+    });
+    forEachWithPath(frag.children, "", (node, path) => {
+      const keep = savedContent.get(path);
+      if (keep != null) node.content = keep;
+    });
     this.root.children = frag.children;
     return this.persist("tidy", "(整树)");
   }
