@@ -63,6 +63,27 @@ function fuzzySibling(siblings: MemoryNode[], title: string, nth: number): Memor
   return scored[nth - 1]?.c;
 }
 
+/**
+ * 按物化路径遍历子树（重名兄弟带 `[n]` 消歧，与 store.flatten / applyTree 同一套规则）。
+ * `parentPath` 为当前子树相对基准（"" 表示以 children 的直接父为根）。
+ * 用于整理时按路径搬回节点 content。
+ */
+export function forEachWithPath(
+  children: MemoryNode[],
+  parentPath: string,
+  fn: (node: MemoryNode, path: string) => void,
+): void {
+  const counts = new Map<string, number>();
+  for (const child of children) {
+    const seen = (counts.get(child.title) ?? 0) + 1;
+    counts.set(child.title, seen);
+    const seg = seen > 1 ? `${child.title}[${seen}]` : child.title;
+    const path = parentPath ? `${parentPath}/${seg}` : seg;
+    fn(child, path);
+    forEachWithPath(child.children, path, fn);
+  }
+}
+
 export function levenshtein(a: string, b: string): number {
   if (a === b) return 0;
   const m = a.length;

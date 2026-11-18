@@ -98,6 +98,19 @@ test("applyOutline：过大 outline 拒绝", () => {
   assert.throws(() => applyOutline(root, "域", big), /过大/);
 });
 
+test("applyOutline：按物化路径保留子节点 content", () => {
+  const root = parseMarkdown("# Memory\n\n## 工作\n### 调研\n- 事实A\n");
+  root.children[0]!.children[0]!.content = "调研完整正文";
+
+  // 同路径节点（叶子被重写）content 应保留
+  applyOutline(root, "工作", "### 调研\n- 事实A（合并）\n");
+  assert.equal(root.children[0]!.children[0]!.content, "调研完整正文");
+
+  // 改名 → 路径变化 → 无法映射，content 丢失（与 applyTree 行为一致）
+  applyOutline(root, "工作", "### 调研改名\n- 事实A\n");
+  assert.equal(root.children[0]!.children[0]!.content, undefined);
+});
+
 test("serializeOutline：叶子+子节点 round-trip（不含节点标题，可被 parseFragment 还原）", () => {
   const root = parseMarkdown(`# Memory
 

@@ -54,6 +54,29 @@ test("applyTree：根下带列表项拒绝", async () => {
   await assert.rejects(() => mf.applyTree("- 不允许\n## 域\n"), /根节点下不应有列表项/);
 });
 
+test("applyOutline：局部整理按路径保留子节点 content", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mx-tidy-local-content-"));
+  const mf = await MemoryFile.open(dir);
+  await mf.upsertNode("工作/调研", "事实A");
+  await mf.writeNote("工作/调研", "调研完整正文");
+  await mf.upsertNode("工作/调研", "事实B");
+  await mf.upsertNode("生活", "体检");
+
+  // 同路径子节点（叶子被重写）content 应保留，且不误伤兄弟域
+  await mf.applyOutline("工作", "### 调研\n- 事实A（合并）\n");
+  assert.equal(mf.readNote("工作/调研"), "调研完整正文");
+  assert.deepEqual(mf.readSection("工作/调研")!.node.leaves, ["事实A（合并）"]);
+  assert.equal(mf.readNote("生活"), null);
+
+  // 重新从 DB 打开，确认 content 确已落盘（而非仅内存保留）
+  const reopened = await MemoryFile.open(dir);
+  assert.equal(reopened.readNote("工作/调研"), "调研完整正文");
+
+  // 改名/路径变化的子节点无法映射，content 丢失（明确记录该行为）
+  await mf.applyOutline("工作", "### 调研改名\n- 事实A（合并）\n");
+  assert.equal(mf.readNote("工作/调研改名"), null);
+});
+
 test("applyTree：按路径保留节点 content（整树整理不丢完整信息）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mx-tidy-content-"));
   const mf = await MemoryFile.open(dir);

@@ -1,4 +1,4 @@
-import { parsePath, splitDisambig } from "./path.ts";
+import { forEachWithPath, parsePath, splitDisambig } from "./path.ts";
 import { serializeSubtree } from "./serializer.ts";
 import type { MemoryNode } from "./types.ts";
 
@@ -106,8 +106,18 @@ export function applyOutline(
   }
 
   const before = serializeSubtree(current);
+  // content（fenced RAG 语料）不经 outline 表达：按物化路径把旧子树 content 迁回同路径节点。
+  // 改名/合并/移动导致路径变化的节点无法映射（会丢失）——与 applyTree 行为一致。
+  const savedContent = new Map<string, string>();
+  forEachWithPath(current.children, "", (node, p) => {
+    if (node.content != null) savedContent.set(p, node.content);
+  });
   current.leaves = frag.leaves;
   current.children = frag.children;
+  forEachWithPath(current.children, "", (node, p) => {
+    const keep = savedContent.get(p);
+    if (keep != null) node.content = keep;
+  });
   const after = serializeSubtree(current);
   return { changed: before !== after, resolvedPath: walked.join("/") };
 }

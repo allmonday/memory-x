@@ -5,33 +5,13 @@ import { applyOutline, parseFragment } from "./fragment.ts";
 import { withDirLock } from "./lock.ts";
 import { deleteNode, moveNode, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
-import { resolvePath } from "./path.ts";
+import { resolvePath, forEachWithPath } from "./path.ts";
 import { serializeSubtree } from "./serializer.ts";
 import { MemoryStore } from "./store.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
 
 export const MEMORY_FILE = "MEMORY.md";
 const EMPTY_DOC = "# Memory\n";
-
-/**
- * 按物化路径（重名兄弟 [n] 消歧，与 store.saveTree 同一套规则）遍历子树。
- * 用于整树替换时按路径搬回 content。
- */
-function forEachWithPath(
-  children: MemoryNode[],
-  parentPath: string,
-  fn: (node: MemoryNode, path: string) => void,
-): void {
-  const counts = new Map<string, number>();
-  for (const child of children) {
-    const seen = (counts.get(child.title) ?? 0) + 1;
-    counts.set(child.title, seen);
-    const seg = seen > 1 ? `${child.title}[${seen}]` : child.title;
-    const path = parentPath ? `${parentPath}/${seg}` : seg;
-    fn(child, path);
-    forEachWithPath(child.children, path, fn);
-  }
-}
 
 /**
  * 记忆文件对象（B 案存储 + 版本历史）：
