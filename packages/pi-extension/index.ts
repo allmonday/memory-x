@@ -137,7 +137,6 @@ export default function memoryExtension(pi: any): void {
           : `已存在，无需写入：${r.path}`,
       );
     },
-    },
   });
 
   pi.registerTool({
