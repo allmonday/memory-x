@@ -26,6 +26,14 @@ CREATE TABLE IF NOT EXISTS leaves(
   text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_leaves_node ON leaves(node_id, ord);
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+  path, title, body, tokenize='trigram'
+);
+CREATE TABLE IF NOT EXISTS access(
+  path TEXT PRIMARY KEY,
+  hits INTEGER NOT NULL DEFAULT 0,
+  last_hit INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 interface NodeRow {
@@ -36,6 +44,17 @@ interface NodeRow {
   path: string;
   depth: number;
   content: string | null;
+}
+
+export interface SearchHit {
+  path: string;
+  title: string;
+  ancestors: string[];
+  siblings: string[];
+  snippet: string;
+  hasContent: boolean;
+  leafCount: number;
+  via: "fts" | "like";
 }
 
 /**
@@ -160,6 +179,148 @@ export class MemoryStore {
     return this.db
       .prepare("SELECT * FROM nodes WHERE path = ? OR path LIKE ? ORDER BY depth, ord")
       .all(prefix, `${prefix}/%`) as NodeRow[];
+  }
+
+  // ---------- 检索层（全部派生，可随时重建） ----------
+
+  /** 整表重建 FTS（毫秒级，persist 后调用）。语料 = path+标题+叶子+content。 */
+  rebuildFts(): void {
+    this.db.exec("BEGIN");
+    try {
+      this.db.exec("DELETE FROM memory_fts");
+      this.db.exec(`
+        INSERT INTO memory_fts(rowid, path, title, body)
+        SELECT n.id, n.path, n.title,
+          COALESCE((SELECT group_concat(l.text, ' ') FROM leaves l WHERE l.node_id = n.id), '')
+          || ' ' || COALESCE(n.content, '')
+        FROM nodes n
+      `);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  ftsIsEmpty(): boolean {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM memory_fts").get() as { n: number };
+    return row.n === 0;
+  }
+
+  /**
+   * 检索：FTS5 trigram（≥3 字词，bm25 排序 + snippet）∪ LIKE 兜底（2 字短词，中文常见）。
+   * 返回带完整链路/祖先/兄弟/命中片段的富化结果。
+   */
+  search(query: string, topK = 5): SearchHit[] {
+    const tokens = query.match(/[\p{L}\p{N}]+/gu) ?? [];
+    const ftsTerms = tokens.filter((t) => t.length >= 3).map((t) => `"${t.replace(/"/g, "")}"`);
+    const shortTerms = tokens.filter((t) => t.length === 2).map((t) => t.replace(/[\\%_]/g, " "));
+    if (ftsTerms.length === 0 && shortTerms.length === 0) return [];
+
+    interface RawHit {
+      path: string;
+      title: string;
+      snippet: string | null;
+      via: "fts" | "like";
+      rank: number;
+    }
+    const seen = new Map<string, RawHit>();
+
+    if (ftsTerms.length > 0) {
+      const rows = this.db
+        .prepare(
+          `SELECT path, title,
+             snippet(memory_fts, 2, '«', '»', '…', 16) AS snip, rank
+           FROM memory_fts WHERE memory_fts MATCH ?
+           ORDER BY rank LIMIT ?`,
+        )
+        .all(ftsTerms.join(" OR "), Math.max(topK * 2, 10)) as Array<{
+        path: string;
+        title: string;
+        snip: string;
+        rank: number;
+      }>;
+      for (const r of rows) {
+        seen.set(r.path, { path: r.path, title: r.title, snippet: r.snip, via: "fts", rank: r.rank });
+      }
+    }
+
+    if (shortTerms.length > 0) {
+      for (const term of shortTerms) {
+        const pat = `%${term}%`;
+        const rows = this.db
+          .prepare(
+            `SELECT DISTINCT n.path, n.title, n.content FROM nodes n
+             LEFT JOIN leaves l ON l.node_id = n.id
+             WHERE n.title LIKE ? ESCAPE ' ' OR n.content LIKE ? ESCAPE ' ' OR l.text LIKE ? ESCAPE ' '
+             LIMIT 50`,
+          )
+          .all(pat, pat, pat) as Array<{ path: string; title: string; content: string | null }>;
+        for (const r of rows) {
+          if (seen.has(r.path)) continue;
+          const body = r.content ?? "";
+          const idx = body.indexOf(term);
+          const snip =
+            idx >= 0
+              ? `${idx > 20 ? "…" : ""}${body.slice(Math.max(0, idx - 20), idx + 60)}`
+              : r.title;
+          seen.set(r.path, { path: r.path, title: r.title, snippet: snip, via: "like", rank: 99 });
+        }
+      }
+    }
+
+    const ordered = [...seen.values()].sort((a, b) => a.rank - b.rank).slice(0, topK);
+    return ordered.map((h) => this.enrich(h));
+  }
+
+  private enrich(h: { path: string; title: string; snippet: string | null; via: "fts" | "like" }): SearchHit {
+    const segs = h.path.split("/");
+    const parentPath = segs.length > 1 ? segs.slice(0, -1).join("/") : null;
+    let siblings: string[] = [];
+    let leafCount = 0;
+    let hasContent = false;
+    if (parentPath !== null) {
+      const rows = this.db
+        .prepare(
+          `SELECT title,
+             (SELECT COUNT(*) FROM leaves l WHERE l.node_id = n.id) AS lc,
+             (n.content IS NOT NULL) AS hc
+           FROM nodes n WHERE n.parent_id = (SELECT id FROM nodes WHERE path = ?)`,
+        )
+        .all(parentPath) as Array<{ title: string; lc: number; hc: number }>;
+      siblings = rows.map((r) => r.title);
+      leafCount = rows.find((r) => r.title === h.title)?.lc ?? 0;
+      hasContent = Boolean(rows.find((r) => r.title === h.title)?.hc);
+    } else {
+      const row = this.db
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM leaves l WHERE l.node_id = n.id) AS lc, (n.content IS NOT NULL) AS hc
+           FROM nodes n WHERE n.path = ?`,
+        )
+        .get(h.path) as { lc: number; hc: number } | undefined;
+      leafCount = row?.lc ?? 0;
+      hasContent = Boolean(row?.hc);
+    }
+    return {
+      path: h.path,
+      title: h.title,
+      ancestors: segs.slice(0, -1),
+      siblings,
+      snippet: h.snippet ?? "",
+      hasContent,
+      leafCount,
+      via: h.via,
+    };
+  }
+
+  /** 记录访问信号（排序燃料，P5）。 */
+  recordAccess(paths: string[]): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO access(path, hits, last_hit) VALUES (?, 1, ?)
+       ON CONFLICT(path) DO UPDATE SET hits = hits + 1, last_hit = excluded.last_hit`,
+    );
+    const now = Date.now();
+    for (const p of paths) stmt.run(p, now);
   }
 
   close(): void {

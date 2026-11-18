@@ -63,6 +63,8 @@ export class MemoryFile {
       }
     } else {
       root = store.loadTree();
+      // 旧库（检索层上线前的数据）无索引 → 补建
+      if (store.ftsIsEmpty()) store.rebuildFts();
     }
     return new MemoryFile(dir, root, store);
   }
@@ -89,6 +91,13 @@ export class MemoryFile {
     return tocDigest(this.root, opts);
   }
 
+  /** 检索：FTS ∪ LIKE 兜底，命中带完整链路/祖先/兄弟。 */
+  search(query: string, topK?: number) {
+    const hits = this.store.search(query, topK);
+    if (hits.length > 0) this.store.recordAccess(hits.map((h) => h.path));
+    return hits;
+  }
+
   /** 节点完整信息（content）。 */
   readNote(path: string): string | null {
     return this.readSection(path)?.node.content ?? null;
@@ -103,6 +112,11 @@ export class MemoryFile {
     }
     r.node.content = content;
     return this.persist("note", path);
+  }
+
+  /** 记录访问信号（工具 read 命中时调用，P5 排序燃料）。 */
+  recordAccess(path: string): void {
+    this.store.recordAccess([path]);
   }
 
   async upsertNode(path: string, leaf: string): Promise<OpResult> {
@@ -134,6 +148,7 @@ export class MemoryFile {
   private async persist(op: string, path: string): Promise<OpResult> {
     const revision = await withDirLock(this.dir, async () => {
       this.store.saveTree(this.root); // 真相：整树单事务
+      this.store.rebuildFts(); // 派生索引（毫秒级整重建）
       await atomicWriteFile(this.filePath, serializeMarkdown(this.root)); // 镜像
       return snapshot(this.dir, `memory: ${op} ${path}`); // 历史（仅镜像）
     });

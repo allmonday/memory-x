@@ -65,6 +65,7 @@ export default function memoryExtension(pi: any): void {
     async execute(_toolCallId: string, params: { path: string }) {
       const m = await memory();
       const md = m.renderSection(params.path);
+      if (md !== null) m.recordAccess(params.path); // 访问信号（P5）
       if (md === null) {
         const tops = m.root.children.map((c) => c.title).join("、") || "（空）";
         return text(`路径不存在：${params.path}\n当前顶层节点：${tops}`);
@@ -146,6 +147,40 @@ export default function memoryExtension(pi: any): void {
   });
 
   pi.registerTool({
+    name: "memory_search",
+    label: "搜记忆",
+    description:
+      "在长期记忆树中检索（FTS+兜底）：返回命中节点的完整链路、祖先/兄弟、命中片段。不确定信息在哪个节点时先用它，再 memory_read 取全文",
+    promptSnippet: "检索长期记忆树（返回链路）",
+    promptGuidelines: [
+      "Use memory_search instead of guessing node paths when the topic may relate to stored memory but the TOC does not clearly show where it lives.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "检索词（关键词、话题、同义改写均可）" },
+        top_k: { type: "number", description: "返回条数（默认 5）" },
+      },
+      required: ["query"],
+    },
+    async execute(_toolCallId: string, params: { query: string; top_k?: number }) {
+      const m = await memory();
+      const hits = m.search(params.query, params.top_k ?? 5);
+      if (hits.length === 0) {
+        return text(`无命中：「${params.query}」。可换关键词，或 memory_read 目录下钻。`);
+      }
+      const lines = hits.map((h, i) => {
+        const chain = [...h.ancestors, h.title].join(" › ");
+        const meta = [h.hasContent ? "有完整信息" : null, h.leafCount > 0 ? `${h.leafCount} 条事实` : null]
+          .filter(Boolean)
+          .join("，");
+        return `${i + 1}. ${chain}${meta ? `（${meta}）` : ""}\n   ${h.snippet}`;
+      });
+      return text(`命中 ${hits.length} 条：\n${lines.join("\n")}\n（取全文：memory_read 对应路径）`);
+    },
+  });
+
+  pi.registerTool({
     name: "memory_stats",
     label: "记忆统计",
     description: "记忆树的规模统计（节点数/叶子数/顶层域）",
@@ -168,16 +203,40 @@ export default function memoryExtension(pi: any): void {
       const m = await memory();
       cachedToc = tocDigest(m.root, { maxChars: SECTION_MAX_CHARS });
     }
-    // sections: Record<string, string>，渲染为 <memory>…</memory>（prompt-customizer.ts 同款做法）
-    event.systemPromptOptions.sections.memory = [
+    const rules = [
       "你有一棵长期记忆树（markdown 大纲，存储在用户机器上）。目录（[n] = 子树叶子总数）：",
       cachedToc,
       "使用规则：",
       "- 需要背景时用 memory_read 按路径下钻，不要凭空猜测记忆内容",
+      "- 不确定信息在哪个节点时先用 memory_search 检索（命中带完整链路）",
       "- 对话中出现跨会话有价值的结论/决策/实体关系/长期待办时，用 memory_upsert 主动记录（一条一事，带日期标注）",
       "- 结构性重构（新增子树、整理分支）用 memory_apply_outline，零散增补用 memory_upsert",
       "- 不确定路径时先读目录或用更浅路径试探，避免盲写",
-    ].join("\n");
+    ];
+
+    // 自动召回：用户输入 → FTS top-3 → 追加「相关记忆」段（零工具调用的兑底）
+    if (event.messageType === "user" && typeof event.prompt === "string" && event.prompt.length >= 2) {
+      try {
+        const m = await memory();
+        const hits = m.search(event.prompt, 3);
+        if (hits.length > 0) {
+          const lines = hits.map((h) => {
+            const chain = [...h.ancestors, h.title].join(" › ");
+            return `- ${chain}：${h.snippet.slice(0, 60)}`;
+          });
+          rules.push(
+            "",
+            "以下是与本次输入自动召回的相关记忆（确认可用；需要全文用 memory_read）：",
+            ...lines,
+          );
+        }
+      } catch {
+        // 召回失败不阻断会话
+      }
+    }
+
+    // sections: Record<string, string>，渲染为 <memory>…</memory>（prompt-customizer.ts 同款做法）
+    event.systemPromptOptions.sections.memory = rules.join("\n");
   });
 
   // ---------- 命令 ----------

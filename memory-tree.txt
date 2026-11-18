@@ -1,0 +1,33 @@
+# Memory X tree dump — 2026-11-18 00:01（含叶子）
+
+# Memory
+└─ 个人资料 [21]
+   └─ 个人资料 [21]
+      ├─ 基本信息 [4]
+      │    · 用户姓名：汤奇科多 ← 2025-07-30
+      │    · GitHub 用户名：allmonday ← 2025-07-30
+      │    · 拥有 GitHub Organization：klr-pattern（用户 allmonday）← 2025-07-30
+      │    · 待办：整理家里的衣物 ← 2026-11-17
+      ├─ 兴趣爱好 [10]
+      │    · 兴趣爱好：编程、玩过山车 ← 2025-07-30
+      │    · 最喜欢的科学家：奥本海默（J. Robert Oppenheimer）；着迷于他神奇的人生经历 ← 2026-11-17
+      │  └─ 过山车乐园清单 [8]
+      │       · 计划考察：上海迪士尼 TRON、常州恐龙园过山龙、上海欢乐谷、南京欢乐谷、常州嬉戏谷、杭州乐园、苏州森林世界；锦江乐园已移除（原址哈利波特项目为 Studio Tour 展陈业态，无过山车）← 2026-11-17
+      │     ├─ 事实核查（信源：RCDB 过山车数据库 + 搜狗新闻，2026-11-17） [6]
+      │     │    · 已证实：TRON 创极速光轮＝Vekoma LSM 弹射、摩托骑乘、95.4km/h、966m（756m 在室内）；过山龙 Dinoconda＝S&S 第四维（Alan Schilke 设计）、69m、126km/h、3 翻滚，全球大型 4D 仅三台（X2/Eejanaika/过山龙）
+      │     │    · 已证实：上海欢乐谷 RCDB 登记 8 台（Fireball 木制＝谷木游龙、Diving＝绝顶雄风、Mega-Lite、Mine Train 等），2025/26 有新增未名过山车；南京欢乐谷 2020-11-11 开业（新华日报）
+      │     │    · 已证实：嬉戏谷（RCDB 名 Wansuishan Taihu Bay，武进）3 台含"云之秘境 Clouds of Fairyland"；杭州乐园有 Suspended 悬挂车；苏州森林世界运营中（官网 szal.cn）
+      │     │    · 已核实（信源：中国网 2025-02-12、人民网上海 2025-02-14 官方解答、人民日报梅陇镇稿）：锦江乐园 2025-01-26 闭园改造；原址建「华纳兄弟（上海）制片厂之旅——"哈利·波特"的诞生」，锦江国际×华纳兄弟探索集团全球体验事业部合资（2025-01-31 框架协议），2027 下半年建成开放；官方明确「不是游乐园」，为伦敦/东京同款 Studio Tour 电影幕后展陈（室内外景区、参观约半天、需预约），无过山车，不列入清单；票价对标伦敦/东京 320–460 元；占地约 5.3 万 m²、总建面约 7.5 万 m²，土建 2027-01 竣备 ← 2026-11-17
+      │     │    · 已核实：锦江乐园仅酒店与摩天轮保留，其余游乐设备（含 Giant Inverted Boomerang 等 RCDB 登记 7 台）全部拆除；上海大转盘（2002 年建）使用年限到期换代，新摩天轮暂定 118 米（待国家审核），设计不含哈利波特元素 ← 2026-11-17
+      │     │    · 经验：本环境无 web search 工具；curl 可用信源＝RCDB（/qs.htm?qs=，高频请求会被 404 限流）＋搜狗＋迪士尼官网；维基/DDG 不可达，Bing 中文分词失效，百度/百科有验证码；人民网/中国网直连需 curl -k（证书校验 exit 60）；搜狗结果页可提取 /link?url= 跳转与直链 ← 2026-11-17
+      │     └─ 待办 [1]
+      │          · 出发前查上海欢乐谷新车官方信息
+      └─ 工作方向 [7]
+           · 近期工作重点之一：辅导孩子认字（孩子处于识字启蒙阶段）← 2026-11-17
+           · 待办：开发一个儿童识字软件（与「辅导孩子认字」方向相关，孩子处于识字启蒙阶段）← 2026-11-17
+         └─ nexusx [5]
+              · GitHub org klr-pattern 下的项目（用户 allmonday）← 2025-07-30
+              · 当前 v6.8.0；近期主题：MCP tool annotations + mutation 确认（AI mutation safety P1/P2 已完成）、MCP server instructions 透传、FastMCP 4.1 + Python 3.10–3.14、federation 分页审查（todo.md）全部完成 ← 2026-11-17
+              · 进行中未提交改动：3.0 入口改名 create_use_case_mcp_server → create_use_case_graphql_mcp_server（含 demo/docs 同步），MCP GraphQL 字符串参数改为走 variables 而非内联转义 ← 2026-11-17
+              · 决策：federation/pagination 要趁低使用率期收紧——先做契约级（错误语义统一、offset-v1 兼容规则、标 experimental），retry/tracing/auth/keyset 分页推迟到有真实需求 ← 2026-11-17
+              · federation 现状发现：remote_loader.py 无任何 except，member 宕机/超时走裸 httpx/FederationTransportError，与 RemoteQueryError 两族错误未统一；transport.py 已有 FederationTransport Protocol auth seam，但无身份传播；协议 Literal["offset-v1"] 无升级规则 ← 2026-11-17
