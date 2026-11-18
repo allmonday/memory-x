@@ -4,3 +4,4 @@ node_modules/
 eval/questions.json
 eval/results/
 eval/memory/runs/
+eval/halumem/runs/

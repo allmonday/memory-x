@@ -27,6 +27,8 @@ export interface Probe {
   answer?: string | null;
   /** answer=正常问答；refuse=应该拒绝/说不知道（对抗题） */
   kind?: "answer" | "refuse";
+  /** 分类标签（如 HaluMem 的 question_type），用于分桶统计 */
+  tag?: string;
 }
 export interface Scenario {
   id: string;
@@ -118,6 +120,8 @@ export interface Result {
   /** 问答：正确数 / 总数 */
   qaPass?: number;
   qaTotal?: number;
+  /** 问答分类桶：tag → { pass, total } */
+  byTag?: Record<string, { pass: number; total: number }>;
   details: string[];
 }
 
@@ -147,19 +151,26 @@ export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClie
   const probes = s.probes ?? [];
   if (probes.length > 0 && opts.llm) {
     let pass = 0;
+    const byTag: Record<string, { pass: number; total: number }> = {};
     for (const p of probes) {
       const hits = mf.search(p.question, 5);
       const ctx = hits.map((h) => mf.renderSection(h.path) ?? "").join("\n\n---\n\n");
       const pred = (await opts.llm.chat(ANSWER_SYSTEM, answerUser(ctx, p.question))).trim();
       const system = p.kind === "refuse" ? REFUSE_SYSTEM : JUDGE_SYSTEM;
       const user = p.kind === "refuse" ? refuseUser(p.question, pred) : judgeUser(p.question, String(p.answer), pred);
-      const verdict = (await opts.llm.chat(system, user, 400)).trim().toUpperCase();
+      const verdict = (await opts.llm.chat(system, user, 800)).trim().toUpperCase();
       const ok = verdict.startsWith("CORRECT");
       if (ok) pass++;
       else details.push(`✗ 问答：${p.question} → 「${pred}」（期望「${p.answer ?? "拒绝"}」）`);
+      if (p.tag) {
+        const b = (byTag[p.tag] ??= { pass: 0, total: 0 });
+        b.total++;
+        if (ok) b.pass++;
+      }
     }
     res.qaPass = pass;
     res.qaTotal = probes.length;
+    if (Object.keys(byTag).length > 0) res.byTag = byTag;
   }
   return res;
 }

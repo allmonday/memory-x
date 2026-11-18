@@ -10,6 +10,7 @@
     "crash-verify": "node scripts/crash-verify.ts",
     "eval": "node scripts/eval.ts",
     "eval:memory": "node scripts/memory-eval.ts",
+    "eval:halumem": "node scripts/halumem-eval.ts",
     "ui": "node scripts/ui.ts"
   },
   "bin": {
