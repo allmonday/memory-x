@@ -49,6 +49,49 @@ export function supersedeUser(memoryLines: string, facts: string[]): string {
   return `当前记忆：\n${memoryLines || "（空）"}\n\n本轮新抽出的事实：\n${facts.map((f) => `- ${f}`).join("\n")}\n\n请输出写操作。`;
 }
 
+// ---------- Turn 级 agent 仿真（复刻 extension：目录 + 召回注入，每轮自主 ADD/UPDATE/NOOP） ----------
+
+export const AGENT_WRITE_SYSTEM = [
+  "你是记忆管家 agent：每轮对话后，依据「记忆目录」和「召回的记忆全文」决定如何更新长期记忆树。",
+  "判断规则：",
+  "- 只记跨会话仍有价值的事实：身份/偏好/经历/关系/计划/重要日期/地点/数字/决定；寒暄、情绪性闲聊、一次性信息不记 → NOOP；",
+  "- 写入前先看召回：同一对象同一属性若已有叶子，而本轮出现了新取值/新偏好信号（**即使没有明说「替换/不再」**，如与新宠物互动并大加赞赏），必须用 UPDATE 把旧叶子改写为当前状态；**新事实只描述当前状态，不要保留旧取值字样（不要写 previously/used to/不再）**；同属性两条取值并存是错误；",
+  "- **并列≠重复**：同一主题下不同属性/不同对象是不同叶子（喜欢猫 ≠ 怕蛇 ≠ 喜欢鹦鹉），各自保留不得合并；NOOP 仅当与现有叶子语义等价；",
+  "- 全新主题的新事实 → ADD：路径按主题组织（对象/属性，如 Profile/Pets、Career/Role），不要按时间或 session 命名；缺失的中间节点会自动创建；",
+  "- **写入已存在的主题路径前必须先 SEARCH**：若目录中已有该主题节点（如 Profile/Pets）而召回里没有它的叶子 → 先输出一行 `SEARCH <主题词>`（用对象/属性词，如 pets preferences、job role，不要照抄本轮新值的字面词），拿到现有叶子后再决定 UPDATE（同属性新取值）或 NOOP（语义等价）；只有全新主题才可直接 ADD；",
+  "- 路径必须照抄目录/节点现状中出现的完整路径（含层级，如 Profile/Pets），不要自创缩写或只写末段；",
+  "- 若上下文附有「写入目标节点的当前内容」：同属性新取值必须 UPDATE 对应旧叶子，不得 ADD 并存；语义等价 → NOOP；",
+  "- UPDATE 的旧叶子原文与路径都必须与召回/检索结果/节点现状**逐字一致**；确实拿不准是否同属性 → ADD；",
+  "- 每条叶子一句完整短句（含人名/主语），保留日期/数字/关键词，用对话的语言；不编造；",
+  "输出格式（每行一条，不要其它文字、不要代码块）：",
+  "ADD <路径> | <事实>",
+  "UPDATE <路径> | <被替换的旧叶子原文> | <新事实>",
+  "NOOP",
+  "SEARCH <检索词>",
+].join("\n");
+
+export function agentWriteUser(
+  toc: string,
+  recall: string,
+  recent: string,
+  date: string | undefined,
+  turn: string,
+  searchResult?: string,
+  nodeContext?: string,
+): string {
+  return [
+    `记忆目录：\n${toc || "（空）"}`,
+    `\n召回的相关记忆（全文）：\n${recall || "（无）"}`,
+    searchResult ? `\n你请求的检索结果：\n${searchResult}` : "",
+    nodeContext ? `\n写入目标节点的当前内容（写入前核对，避免并存/重复）：\n${nodeContext}` : "",
+    recent ? `\n最近对话（上下文）：\n${recent}` : "",
+    `\n本轮对话${date ? `（${date}）` : ""}：\n${turn}`,
+    "\n请输出本轮写操作。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 /** 答题提示词：关键是不被"确切日期/版本缺失"卡住——证据在就答，否定性事实也算证据。 */
 export const ANSWER_SYSTEM = [
   "Answer the question using ONLY the retrieved memory excerpts.",
@@ -57,10 +100,19 @@ export const ANSWER_SYSTEM = [
   "- If excerpts conflict, prefer the most recent / updated fact and ignore outdated ones.",
   "- Combine facts across excerpts; be concise and specific (names, dates, numbers).",
   "- Only say 'I don't know' if NO excerpt contains anything about the subject.",
+  "- If the question asks about CHANGES / HISTORY / EVOLUTION (how X changed, what X used to be, previous values) and the excerpts only show the current state: output exactly one line `HISTORY <path>` (path = the most relevant section path from the excerpts). You will then receive the change timeline to answer from.",
 ].join("\n");
 
-export function answerUser(context: string, question: string): string {
-  return `Retrieved memory:\n${context}\n\nQuestion: ${question}\n\nAnswer concisely:`;
+export function answerUser(context: string, question: string, history?: string): string {
+  return [
+    `Retrieved memory (CURRENT state — authoritative for "what is X now"):\n${context}`,
+    history
+      ? `\n⚠️ Version history (chronological change log — values tagged [OLD] are SUPERSEDED and NO LONGER current;\n[NEW] was the value at that point; the final/current value is the one in Retrieved memory above.\nTimestamps are write-order, not dialogue dates):\n${history}`
+      : "",
+    `\nQuestion: ${question}\n\nAnswer concisely:`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export const JUDGE_SYSTEM = "You are a strict but fair grader. Reply with exactly one word: CORRECT or WRONG.";

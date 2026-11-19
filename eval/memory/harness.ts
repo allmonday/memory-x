@@ -13,9 +13,9 @@
  */
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { MemoryFile } from "../../packages/core/src/index.ts";
+import { MemoryFile, tocDigest } from "../../packages/core/src/index.ts";
 import { LlmClient } from "../llm.ts";
-import { ANSWER_SYSTEM, EXTRACT_SYSTEM, JUDGE_SYSTEM, REFUSE_SYSTEM, SUPERSEDE_SYSTEM, answerUser, extractUser, judgeUser, refuseUser, supersedeUser } from "./prompts.ts";
+import { AGENT_WRITE_SYSTEM, ANSWER_SYSTEM, EXTRACT_SYSTEM, JUDGE_SYSTEM, REFUSE_SYSTEM, SUPERSEDE_SYSTEM, agentWriteUser, answerUser, extractUser, judgeUser, refuseUser, supersedeUser } from "./prompts.ts";
 
 export interface Observation {
   id?: string;
@@ -42,6 +42,18 @@ export interface Scenario {
   expectIgnore?: string[];
   /** 召回/问答探针 */
   probes?: Probe[];
+}
+
+/** 写入操作统计（turn-agent 仿真用） */
+export interface WriteStats {
+  adds: number;
+  updates: number;
+  failed: number;
+  /** 两阶段 SEARCH 协议触发次数 */
+  searches: number;
+  /** 自动下钻（写入已存在路径前附节点现状）次数 */
+  drills: number;
+  failedLines: string[];
 }
 
 // ---------- 文本匹配（无需 LLM 的粗判） ----------
@@ -80,8 +92,31 @@ function allLeaves(mf: MemoryFile): string[] {
   return out;
 }
 
+/** 归一化：小写 + 去非字母数字（供宽松匹配） */
+const normText = (s: string): string => s.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gu, "");
+
+/** 全树叶子定位（文本 → 完整路径），供 UPDATE 兑底 */
+function leafLocations(mf: MemoryFile): Array<{ path: string; text: string }> {
+  const out: Array<{ path: string; text: string }> = [];
+  const walk = (n: any, path: string) => {
+    for (const l of n.leaves) out.push({ path, text: l });
+    for (const c of n.children) walk(c, path ? `${path}/${c.title}` : c.title);
+  };
+  walk(mf.root as any, "");
+  return out;
+}
+
+/** 按叶子边界截断拼接的 section（避免把叶子切半导致模型引用非逐字旧值） */
+function capAtLeafBoundary(joined: string, max: number): string {
+  if (joined.length <= max) return joined;
+  const head = joined.slice(0, max);
+  const marks = [...head.matchAll(/\n\s*-\s/g)];
+  const last = marks[marks.length - 1];
+  return last?.index ? head.slice(0, last.index) : head;
+}
+
 // ---------- 写入（机械 / LLM 抽取 / LLM 更新感知） ----------
-type IngestMode = "mechanical" | "llm" | "llm-update";
+type IngestMode = "mechanical" | "llm" | "llm-update" | "turn-agent";
 
 /** 当前记忆展平成 `[路径] 叶子` 行（供更新感知的写入提示） */
 function memoryLines(mf: MemoryFile): string {
@@ -104,18 +139,64 @@ function parseFacts(raw: string): string[] {
     .filter(Boolean);
 }
 
-/** 应用模型给出的 ADD / UPDATE 操作 */
-async function applyOps(mf: MemoryFile, raw: string): Promise<void> {
+/** 应用模型给出的 ADD / UPDATE 操作（容错：单条失败不中断整个评测） */
+async function applyOps(
+  mf: MemoryFile,
+  raw: string,
+  failedOut?: string[],
+): Promise<{ adds: number; updates: number; failed: number }> {
+  let adds = 0, updates = 0, failed = 0;
   for (const line of raw.split("\n")) {
     const t = line.trim();
     const u = /^UPDATE\b/i.test(t) ? t.replace(/^UPDATE\s*/i, "").split("|").map((x) => x.trim()) : null;
     const a = !u && /^ADD\b/i.test(t) ? t.replace(/^ADD\s*/i, "").split("|").map((x) => x.trim()) : null;
-    if (u && u.length >= 3 && u[0] && u[1] && u[2]) await mf.updateNode(u[0], u[1], u.slice(2).join(" | "));
-    else if (a && a.length >= 2 && a[0] && a[1]) await mf.upsertNode(a[0], a.slice(1).join(" | "));
+    try {
+      if (u && u.length >= 3 && u[0] && u[1] && u[2]) {
+        const nw = u.slice(2).join(" | ");
+        let r = await mf.updateNode(u[0], u[1], nw);
+        if (!r.changed) {
+          // 兑底 1：旧值全树唯一逐字命中（裸名/错节点路径被纠正）
+          const locs = leafLocations(mf);
+          const exact = locs.filter((l) => l.text === u[1]);
+          if (exact.length === 1) r = await mf.updateNode(exact[0]!.path, u[1], nw);
+          else {
+            // 兑底 2：旧值前缀（前 12 词）唯一子串命中（模型轻微改写/截断的引用）
+            const pref = u[1]!.split(/\s+/).slice(0, 12).join(" ");
+            if (pref.length >= 12) {
+              const sub = locs.filter((l) => l.text.includes(pref));
+              if (sub.length === 1) r = await mf.updateNode(sub[0]!.path, sub[0]!.text, nw);
+              else {
+                // 兑底 3：归一化前缀唯一命中（模型合并/改写多条叶子后的引用）
+                const npref = normText(u[1]!).slice(0, 48);
+                if (npref.length >= 24) {
+                  const nsub = locs.filter((l) => normText(l.text).includes(npref));
+                  if (nsub.length === 1) r = await mf.updateNode(nsub[0]!.path, nsub[0]!.text, nw);
+                }
+              }
+            }
+          }
+        }
+        if (r.changed) updates++;
+        else {
+          failed++;
+          failedOut?.push(t);
+        }
+      } else if (a && a.length >= 2 && a[0] && a[1]) {
+        await mf.upsertNode(a[0], a.slice(1).join(" | "));
+        adds++;
+      } else if (t && !/^NOOP$/i.test(t) && !/^SEARCH\s/i.test(t)) {
+        failed++;
+        failedOut?.push(t);
+      }
+    } catch {
+      failed++;
+      failedOut?.push(t);
+    }
   }
+  return { adds, updates, failed };
 }
 
-async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: IngestMode): Promise<void> {
+async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: IngestMode): Promise<{ writeStats?: WriteStats } | void> {
   if (mode === "llm-update" && llm) {
     for (let i = 0; i < s.observations.length; i++) {
       const o = s.observations[i]!;
@@ -129,6 +210,87 @@ async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: 
       for (const f of facts) if (!coveredBy(f, leafTokens)) await mf.upsertNode(`记忆/${o.id ?? `obs-${i + 1}`}`, f);
     }
     return;
+  }
+  // ---------- Turn 级 agent 仿真：每轮注入目录+召回，模型自主 ADD/UPDATE/NOOP ----------
+  if (mode === "turn-agent" && llm) {
+    const TOC_MAX = 1600;
+    const RECALL_MAX = 2400;
+    let recent: string[] = [];
+    let lastSession: string | null = null;
+    const stats = { adds: 0, updates: 0, failed: 0, searches: 0, drills: 0, failedLines: [] as string[] };
+    for (let i = 0; i < s.observations.length; i++) {
+      const o = s.observations[i]!;
+      const sess = o.id?.split("-t")[0] ?? `obs-${i}`;
+      if (sess !== lastSession) {
+        recent = [];
+        lastSession = sess;
+      }
+      const toc = tocDigest(mf.root, { maxChars: TOC_MAX });
+      const recentCtx = recent.slice(-2).join("\n");
+      const provided = new Set<string>();
+      let recall = "";
+      try {
+        const recallHits = mf.search(o.text, 4);
+        for (const h of recallHits) provided.add(h.path);
+        recall = capAtLeafBoundary(
+          recallHits
+            .map((h) => mf.renderSection(h.path) ?? "")
+            .filter(Boolean)
+            .join("\n---\n"),
+          RECALL_MAX,
+        );
+      } catch {
+        // 空树/检索失败视为无召回
+      }
+      let raw = await llm.chat(AGENT_WRITE_SYSTEM, agentWriteUser(toc, recall, recentCtx, o.date, o.text), 2000);
+      // 阶段 1：模型主动 SEARCH → 给检索结果
+      const sm = raw.match(/^SEARCH\s+(.+)$/im);
+      if (sm?.[1]?.trim()) {
+        stats.searches++;
+        let found = "";
+        try {
+          for (const h of mf.search(sm[1].trim(), 4)) {
+            provided.add(h.path);
+            found += (found ? "\n---\n" : "") + (mf.renderSection(h.path) ?? "");
+          }
+          found = capAtLeafBoundary(found, RECALL_MAX);
+        } catch {
+          // 检索失败当作无结果
+        }
+        raw = await llm.chat(AGENT_WRITE_SYSTEM, agentWriteUser(toc, recall, recentCtx, o.date, o.text, found || "（无命中）"), 2000);
+      }
+      // 阶段 2：自动下钻——写入目标路径已存在但内容未在上下文 → 附上节点现状再确认（等价生产中写前 memory_read）
+      const targetPaths = [...raw.matchAll(/^(?:ADD|UPDATE)\s+([^|\n]+?)(?:\s*\||$)/gim)]
+        .map((m) => m[1]!.trim())
+        .filter((p) => p && !provided.has(p) && mf.renderSection(p) !== null);
+      if (targetPaths.length > 0) {
+        stats.drills++;
+        const nodeCtx = capAtLeafBoundary(
+          [...new Set(targetPaths)]
+            .slice(0, 3)
+            .map((p) => mf.renderSection(p) ?? "")
+            .filter(Boolean)
+            .join("\n---\n"),
+          RECALL_MAX,
+        );
+        raw = await llm.chat(
+          AGENT_WRITE_SYSTEM,
+          agentWriteUser(toc, recall, recentCtx, o.date, o.text, undefined, nodeCtx),
+          2000,
+        );
+      }
+      const r = await applyOps(mf, raw, stats.failedLines);
+      stats.adds += r.adds;
+      stats.updates += r.updates;
+      stats.failed += r.failed;
+      recent.push(o.text);
+      if ((i + 1) % 50 === 0)
+        console.log(
+          `  … turn-agent 进度 ${i + 1}/${s.observations.length}（ADD ${stats.adds} · UPDATE ${stats.updates} · 失败 ${stats.failed}）`,
+        );
+    }
+    stats.failedLines = stats.failedLines.slice(0, 20);
+    return { writeStats: stats };
   }
   if (mode === "llm" && llm) {
     for (let i = 0; i < s.observations.length; i++) {
@@ -148,6 +310,45 @@ async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: 
 }
 
 // ---------- 评分 ----------
+
+/** 版本时间线：该路径（或包含该关键词的路径）的叶子级变更史（旧 → 新，按写入序） */
+export function historyTimeline(mf: MemoryFile, pathQuery: string, maxChars = 3000): string {
+  const q = pathQuery.trim().toLowerCase();
+  if (!q) return "";
+  const rows = mf
+    .listChanges({ limit: 2000 })
+    .filter(
+      (c) =>
+        (c.fromText || c.toText) &&
+        (c.path.toLowerCase() === q || c.path.toLowerCase().endsWith("/" + q) || c.path.toLowerCase().includes(q)),
+    )
+    .sort((a, b) => a.revisionId - b.revisionId);
+  const lines = rows.map(
+    (c) =>
+      `[#${c.revisionId}] ${c.path}:\n  [OLD·已被替换] ${c.fromText ?? "（新增）"}\n  [NEW·当时新值] ${c.toText ?? "（删除）"}`,
+  );
+  let out = lines.join("\n");
+  if (out.length > maxChars) out = `${out.slice(0, maxChars)}\n…（截断）`;
+  return out;
+}
+
+/** 两阶段问答：模型可请求 HISTORY 获得版本时间线后再作答（让模型自判是否需要历史） */
+export async function answerProbe(
+  mf: MemoryFile,
+  llm: LlmClient,
+  question: string,
+  ctx: string,
+): Promise<{ pred: string; historyUsed: boolean; historyPath?: string }> {
+  let pred = (await llm.chat(ANSWER_SYSTEM, answerUser(ctx, question))).trim();
+  const hm = pred.match(/^HISTORY\s+(.+)$/im);
+  if (hm?.[1]?.trim()) {
+    const path = hm[1].trim();
+    const hist = historyTimeline(mf, path);
+    pred = (await llm.chat(ANSWER_SYSTEM, answerUser(ctx, question, hist || "（该路径无变更记录）"))).trim();
+    return { pred, historyUsed: true, historyPath: path };
+  }
+  return { pred, historyUsed: false };
+}
 export interface Result {
   id: string;
   competency: string;
@@ -159,18 +360,23 @@ export interface Result {
   qaTotal?: number;
   /** 问答分类桶：tag → { pass, total } */
   byTag?: Record<string, { pass: number; total: number }>;
+  /** 写入操作统计（turn-agent） */
+  writeStats?: WriteStats;
+  /** 问答阶段触发 HISTORY 协议的题数 */
+  historyProbes?: number;
   details: string[];
 }
 
 export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClient | null; mode: IngestMode }): Promise<Result> {
   await mkdir(opts.dir, { recursive: true });
   const mf = await MemoryFile.open(opts.dir);
-  await ingest(mf, s, opts.llm, opts.mode);
+  const ingestInfo = await ingest(mf, s, opts.llm, opts.mode);
 
   const leaves = allLeaves(mf);
   const leafWords = new Set(leaves.flatMap((l) => contentTokens(l)));
   const details: string[] = [];
   const res: Result = { id: s.id, competency: s.competency, details };
+  if (ingestInfo?.writeStats) res.writeStats = ingestInfo.writeStats;
 
   const remember = s.expectRemember ?? [];
   if (remember.length > 0) {
@@ -188,11 +394,13 @@ export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClie
   const probes = s.probes ?? [];
   if (probes.length > 0 && opts.llm) {
     let pass = 0;
+    let historyUsed = 0;
     const byTag: Record<string, { pass: number; total: number }> = {};
     for (const p of probes) {
       const hits = mf.search(p.question, 5);
       const ctx = hits.map((h) => mf.renderSection(h.path) ?? "").join("\n\n---\n\n");
-      const pred = (await opts.llm.chat(ANSWER_SYSTEM, answerUser(ctx, p.question))).trim();
+      const { pred, historyUsed: usedHistory } = await answerProbe(mf, opts.llm, p.question, ctx);
+      if (usedHistory) historyUsed++;
       const system = p.kind === "refuse" ? REFUSE_SYSTEM : JUDGE_SYSTEM;
       const user = p.kind === "refuse" ? refuseUser(p.question, pred) : judgeUser(p.question, String(p.answer), pred);
       const verdict = (await opts.llm.chat(system, user, 800)).trim().toUpperCase();
@@ -207,6 +415,7 @@ export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClie
     }
     res.qaPass = pass;
     res.qaTotal = probes.length;
+    res.historyProbes = historyUsed;
     if (Object.keys(byTag).length > 0) res.byTag = byTag;
   }
   return res;

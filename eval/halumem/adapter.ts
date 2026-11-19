@@ -7,6 +7,7 @@
  *   - 每个 session 的 `questions`（带 question_type）→ 召回/多跳/冲突/边界（拒绝）
  *
  * 映射约定：一个 session = 一条 observation（整段对话）；问题按 question_type 打 tag。
+ * turnLevel: true 时改为逐 turn 展开（id 形如 s3-t5），供 turn-agent 仿真模式使用。
  * 数据集不落仓库（许可限制），从缓存/上游读取。
  */
 import type { Observation, Probe, Scenario } from "../memory/harness.ts";
@@ -43,6 +44,8 @@ export interface HaluMemRecord {
 export interface AdapterOpts {
   maxSessions?: number;
   maxQuestionsPerSession?: number;
+  /** 逐 turn 展开 observation（turn-agent 仿真用） */
+  turnLevel?: boolean;
 }
 
 /** HaluMem 记录 → 我们的 Scenario */
@@ -54,8 +57,14 @@ export function toScenario(rec: HaluMemRecord, opts: AdapterOpts = {}): Scenario
   const probes: Probe[] = [];
 
   sessions.forEach((s, i) => {
-    const text = s.dialogue.map((t) => `${t.role}: ${t.content}`).join("\n");
-    observations.push({ id: `s${i + 1}`, date: s.end_time, text });
+    if (opts.turnLevel) {
+      s.dialogue.forEach((t, j) =>
+        observations.push({ id: `s${i + 1}-t${j + 1}`, date: t.timestamp ?? s.end_time, text: `${t.role}: ${t.content}` }),
+      );
+    } else {
+      const text = s.dialogue.map((t) => `${t.role}: ${t.content}`).join("\n");
+      observations.push({ id: `s${i + 1}`, date: s.end_time, text });
+    }
     for (const mp of s.memory_points ?? []) {
       expectRemember.push(mp.memory_content);
       if (mp.is_update === "True") expectIgnore.push(...(mp.original_memories ?? []));

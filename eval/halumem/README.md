@@ -21,10 +21,27 @@
 npm run eval:halumem                                   # Medium，第 1 条记录前 8 session
 npm run eval:halumem -- --records 2 --sessions 10      # 前 2 条，各前 10 session
 npm run eval:halumem -- --mode mechanical              # 机械建树对照
+npm run eval:halumem -- --mode turn-agent --sessions 5 # Turn 级 agent 仿真（每 turn 注入目录+召回，自主 ADD/UPDATE/NOOP）
 npm run eval:halumem -- --qps 3                        # 每 session 最多 3 题（控成本）
 ```
 
-参数：`--data` `--records N` `--sessions N` `--qps N` `--mode llm|mechanical` `--model`。
+参数：`--data` `--records N` `--sessions N` `--qps N` `--mode llm|mechanical|llm-update|turn-agent` `--model`。
+
+三种写入模式构成消融对照：`llm`＝盲写（无记忆上下文，只 ADD）；`llm-update`＝批量两遍（抽取后再对着全树判 ADD/UPDATE）；`turn-agent`＝仿真真实运行时（逐 turn、目录+召回注入、主题路径、SEARCH+自动下钻、原地替换）——只有它测得到「每轮动态更新矫正」链路。
+
+## turn-agent 迭代记录（2026-11-19，记录 1 前 5 sessions，glm-5.3）
+
+| 版本 | precision | recall | UPDATE 次数 | 说明 |
+|---|---|---|---|---|
+| v1 盲写 | 0.000 | 0.935 | 0 | 模型从不 UPDATE |
+| v2 +SEARCH/下钻 | 0.111 | 0.829 | 7 | 自动下钻把旧叶子递到上下文 |
+| v3 +并列≠重复/纯状态句 | 0.222 | 0.772 | 7 | 宠物案干净替换，Cat/Parrot/Reptile 并列保留 |
+
+**关键诊断**（对生产 extension 同样适用）：
+1. 更正性发言只谈新值，FTS 按轮文本检索不到旧叶子 → 模型看不到要替换的对象，只能 ADD。修复＝写前下钻（SEARCH 或自动附节点现状）；
+2. 旧 prompt 的「拿不准一律 ADD」保守偏置 + UPDATE 需逐字 match，使 supersede 几乎不触发；需改为「同属性新信号→必须 UPDATE，并存即错误」；
+3. UPDATE 新句不要保留旧值字样（previously X），否则词面 precision 判残留；
+4. 剩余短板：career 类隐式更新仍未替换（s4 转型没干掉 s1-3 的 considering…）；recall/precision 存在此消彼长，NOOP 偏严会吃掉真事实。
 
 ## 数据集（不落仓库）
 
