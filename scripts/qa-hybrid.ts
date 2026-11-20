@@ -11,6 +11,7 @@ import { LlmClient } from "../eval/llm.ts";
 import { toScenario } from "../eval/halumem/adapter.ts";
 import { answerProbe } from "../eval/memory/harness.ts";
 import { JUDGE_SYSTEM, REFUSE_SYSTEM, judgeUser, refuseUser } from "../eval/memory/prompts.ts";
+import { LlmClient as JudgeClient } from "../eval/llm.ts";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -31,6 +32,9 @@ const rec = JSON.parse((await readFile(dataPath, "utf8")).split("\n").filter(Boo
 const scenario = toScenario(rec, { maxSessions: SESSIONS });
 
 const mf = await MemoryFile.open(join(runDir, "rec-1"));
+const judgeLlm =
+  process.env.EVAL_JUDGE_MODEL === "off" ? null : JudgeClient.fromEnv(process.env.EVAL_JUDGE_MODEL ?? "glm-5.3", { thinking: "auto" });
+const TAG = arg("tag") ? `-${arg("tag")}` : "";
 const llm = LlmClient.fromEnv(arg("model") ?? "glm-5.3-flash");
 console.log(`QA 重放：${runDir}\n检索策略：${RETRIEVAL} · ${scenario.probes?.length ?? 0} 题 · 模型 ${llm.model}\n`);
 
@@ -145,7 +149,7 @@ for (const p of scenario.probes ?? []) {
   }
   const system = p.kind === "refuse" ? REFUSE_SYSTEM : JUDGE_SYSTEM;
   const user = p.kind === "refuse" ? refuseUser(p.question, pred) : judgeUser(p.question, String(p.answer), pred);
-  const verdict = (await llm.chat(system, user, 800)).trim().toUpperCase();
+  const verdict = (await (judgeLlm ?? llm).chat(system, user, 800)).trim().toUpperCase();
   const ok = verdict.startsWith("CORRECT");
   if (ok) pass++;
   else fails.push(`✗ ${p.question} → 「${pred.slice(0, 120)}」（期望「${p.answer ?? "拒绝"}」）`);
@@ -163,7 +167,7 @@ for (const [tag, b] of Object.entries(byTag)) {
 console.log(`问答 总体 ${(tp / tt).toFixed(3)}  (${tp}/${tt})`);
 console.log(`\n${llm.usageLine()}`);
 await (await import("node:fs/promises")).writeFile(
-  join(runDir, `qa-replay-${RETRIEVAL}.json`),
+  join(runDir, `qa-replay-${RETRIEVAL}${TAG}.json`),
   JSON.stringify({ retrieval: RETRIEVAL, byTag, fails }, null, 2),
 );
-console.log(`失败明细：${join(runDir, `qa-replay-${RETRIEVAL}.json`)}`);
+console.log(`失败明细：${join(runDir, `qa-replay-${RETRIEVAL}${TAG}.json`)}`);

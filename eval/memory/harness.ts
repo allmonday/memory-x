@@ -14,7 +14,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { MemoryFile, tocDigest } from "../../packages/core/src/index.ts";
-import { LlmClient } from "../llm.ts";
+import { LlmClient, type Usage } from "../llm.ts";
 import { AGENT_WRITE_SYSTEM, ANSWER_SYSTEM, EXTRACT_SYSTEM, HISTORY_RULE, JUDGE_SYSTEM, REFUSE_SYSTEM, SUPERSEDE_SYSTEM, agentWriteUser, answerUser, extractUser, judgeUser, refuseUser, supersedeUser } from "./prompts.ts";
 
 export interface Observation {
@@ -204,7 +204,7 @@ async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: 
       const facts = parseFacts(await llm.chat(EXTRACT_SYSTEM, extractUser(o.date, o.text), 8000));
       if (facts.length === 0) continue;
       // 第二遍：定向 supersede（当前记忆 + 新事实 → ADD/UPDATE）
-      await applyOps(mf, await llm.chat(SUPERSEDE_SYSTEM, supersedeUser(memoryLines(mf), facts), 8000));
+      await applyOps(mf, await llm.chat(SUPERSEDE_SYSTEM, supersedeUser(memoryLines(mf), facts), 8000), undefined, o.date);
       // 回填：pass2 可能漏掉某些事实——确保每条抽出的事实都进了记忆（保召回）
       const leafTokens = new Set(allLeaves(mf).flatMap((l) => contentTokens(l)));
       for (const f of facts) if (!coveredBy(f, leafTokens)) await mf.upsertNode(`记忆/${o.id ?? `obs-${i + 1}`}`, f);
@@ -366,6 +366,8 @@ export interface Result {
   writeStats?: WriteStats;
   /** 问答阶段触发 HISTORY 协议的题数 */
   historyProbes?: number;
+  /** 判分模型用量（分流时） */
+  judgeUsage?: Usage;
   details: string[];
 }
 
@@ -395,6 +397,11 @@ export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClie
 
   const probes = s.probes ?? [];
   if (probes.length > 0 && opts.llm) {
+    // M1 判分分流：答题用 opts.llm（快），判分用强模型（EVAL_JUDGE_MODEL，默认 glm-5.3 开 thinking；off=不分流）
+    const judgeLlm =
+      process.env.EVAL_JUDGE_MODEL === "off"
+        ? opts.llm
+        : LlmClient.fromEnv(process.env.EVAL_JUDGE_MODEL ?? "glm-5.3", { thinking: "auto" });
     let pass = 0;
     let historyUsed = 0;
     const byTag: Record<string, { pass: number; total: number }> = {};
@@ -405,7 +412,7 @@ export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClie
       if (usedHistory) historyUsed++;
       const system = p.kind === "refuse" ? REFUSE_SYSTEM : JUDGE_SYSTEM;
       const user = p.kind === "refuse" ? refuseUser(p.question, pred) : judgeUser(p.question, String(p.answer), pred);
-      const verdict = (await opts.llm.chat(system, user, 800)).trim().toUpperCase();
+      const verdict = (await judgeLlm.chat(system, user, 800)).trim().toUpperCase();
       const ok = verdict.startsWith("CORRECT");
       if (ok) pass++;
       else details.push(`✗ 问答：${p.question} → 「${pred}」（期望「${p.answer ?? "拒绝"}」）`);
@@ -418,6 +425,7 @@ export async function runScenario(s: Scenario, opts: { dir: string; llm: LlmClie
     res.qaPass = pass;
     res.qaTotal = probes.length;
     res.historyProbes = historyUsed;
+    if (judgeLlm !== opts.llm) res.judgeUsage = judgeLlm.usage;
     if (Object.keys(byTag).length > 0) res.byTag = byTag;
   }
   return res;

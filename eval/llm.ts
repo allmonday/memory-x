@@ -18,14 +18,17 @@ export class LlmClient {
   private readonly base: string;
   private readonly key: string;
   readonly model: string;
+  /** thinking 控制：auto=服务端默认；off=显式关闭；on=显式开启（仅发参数时的差异，on 等同 auto） */
+  private readonly thinking: "auto" | "off";
 
-  constructor(base: string, key: string, model: string) {
+  constructor(base: string, key: string, model: string, opts?: { thinking?: "auto" | "off" }) {
     this.base = base;
     this.key = key;
     this.model = model;
+    this.thinking = opts?.thinking ?? "auto";
   }
 
-  static fromEnv(modelOverride?: string): LlmClient {
+  static fromEnv(modelOverride?: string, opts?: { thinking?: "auto" | "off" }): LlmClient {
     const zai = process.env.ZAI_CODING_CN_API_KEY;
     const gateway = process.env.PI_RUNTIME_GATEWAY_URL ?? "https://llm.ubichat.ubisoft.org";
     const base =
@@ -49,7 +52,8 @@ export class LlmClient {
       throw new Error(
         "缺少 LLM 密钥：设置 EVAL_API_KEY、LITELLM_API_KEY、ZAI_CODING_CN_API_KEY 或 OPENAI_API_KEY",
       );
-    return new LlmClient(base.replace(/\/+$/, ""), key, model);
+    const thinking = opts?.thinking ?? (process.env.EVAL_THINKING === "disabled" ? "off" : "auto");
+    return new LlmClient(base.replace(/\/+$/, ""), key, model, { thinking });
   }
 
   async chat(system: string, user: string, maxTokens = 4000): Promise<string> {
@@ -63,7 +67,7 @@ export class LlmClient {
       max_tokens: maxTokens,
     };
     // EVAL_THINKING=disabled → 关闭深度思考（glm 系列直出，延迟/token 大幅下降）
-    if (process.env.EVAL_THINKING === "disabled") body.thinking = { type: "disabled" };
+    if (this.thinking === "off") body.thinking = { type: "disabled" };
     // 网络重试：千次级长跑必需（ECONNRESET/超时/429/5xx）
     const delays = [2000, 8000, 30000, 60000];
     let lastErr: unknown;
