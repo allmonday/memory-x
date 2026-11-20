@@ -285,6 +285,19 @@ export class MemoryFile {
     return this.store.dayDigest(date);
   }
 
+  /** 弱视图：叶子文本里带「← 日期」标记的条目（库启用前的历史日期兑底；无 session 维度）。 */
+  leavesByDateMark(date: string): Array<{ path: string; leaf: string }> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`日期格式应为 YYYY-MM-DD：${date}`);
+    const mark = `← ${date}`;
+    const out: Array<{ path: string; leaf: string }> = [];
+    const walk = (n: MemoryNode, path: string) => {
+      for (const l of n.leaves) if (l.includes(mark)) out.push({ path: path || n.title, leaf: l });
+      for (const c of n.children) walk(c, path ? `${path}/${c.title}` : c.title);
+    };
+    walk(this.root as MemoryNode, "");
+    return out;
+  }
+
   pruneEpisodes(keep: number): number {
     return this.store.pruneEpisodes(keep);
   }

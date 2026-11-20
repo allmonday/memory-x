@@ -605,9 +605,21 @@ export default function memoryExtension(pi: any): void {
         }
         return text(`【缓存】${path}\n\n${body}${stale}`);
       }
-      // 缓存未建：返回原始素材 + 生成指引
+      // 缓存未建：返回原始素材 + 生成指引；库启用前的历史日期兑底到叶子日期标记（弱视图）
       const d = m.dayDigest(date);
-      if (d.empty) return text(`${date} 无记录（当天无 episodes、无写操作）。`);
+      if (d.empty) {
+        const weak = m.leavesByDateMark(date);
+        if (weak.length === 0) return text(`${date} 无记录（当天无 episodes、无写操作、无日期标记的叶子）。`);
+        return text(
+          [
+            `【弱视图·素材未采集】${date}：当天无 episodes/写操作记录（库启用前），仅有叶子文本里带「← ${date}」标记的条目 ${weak.length} 条：`,
+            "",
+            ...weak.map((w) => `  · [${w.path}] ${w.leaf.slice(0, 100)}`),
+            "",
+            `→ 可据此写日记到 ${path}（无 session 维度，仅事实清单；末行附「> 素材水位：episodes ≤ 0 · revisions ≤ 0」）。`,
+          ].join("\n"),
+        );
+      }
       const lines = [
         `【素材·未缓存】${date}`,
         "",
