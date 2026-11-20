@@ -38,7 +38,15 @@ const AUTO_INJECT_MIN_SCORE = Number(process.env.MEMORY_X_INJECT_MIN ?? "1.0");
  * 记忆写入规范（借 ASD-STE 原则）：短句、一句一事、主动语态、术语一致、去修饰；
  * 保留人名/日期/数字/专有名词；原文或摘要重要时用引用块（> …）原样保留，不要改写。
  */
-const WRITE_STYLE = "短句、一句一事、主动语态、术语一致、去修饰；保留人名/日期/数字/专有名词；原文或摘要重要时用引用块（> …）原样保留。";
+const WRITE_STYLE = "短句、一句一事、主动语态、术语一致、去修饰；保留人名/日期/数字/专有名词；原文或摘要重要时用引用块（> …）原样保留；事实行用与对话相同的语言书写（对话是英文就写英文，不要换语言）。";
+
+/** 新叶子末尾机械附加今天日期（已含日期则不重复）——时间锚点不依赖模型自觉 */
+function withDate(leaf: string): string {
+  if (/←\s*\d{4}-\d{2}-\d{2}/.test(leaf)) return leaf;
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return `${leaf} ← ${today}`;
+}
 
 let cache: MemoryFile | null = null;
 
@@ -225,20 +233,20 @@ export default function memoryExtension(pi: any): void {
     description: "新增/更新一条叶子事实（精确重复为幂等 no-op；路径缺失会自动创建中间节点）",
     promptSnippet: "写入一条长期记忆",
     promptGuidelines: [
-      "Use memory_upsert when the conversation produces a conclusion, decision, entity relation, or long-term todo worth keeping across sessions. One fact per call; timestamp with today's date in the leaf text.",
-      "Write in the memory write style: short sentences, one fact per leaf, active voice, consistent terms, no vague words. Keep names, dates, and numbers. If the original wording matters, keep it verbatim as a quote (> …).",
+      "Use memory_upsert when the conversation produces a conclusion, decision, entity relation, or long-term todo worth keeping across sessions. One fact per call; the write date is stamped automatically.",
+      "Write in the memory write style: short sentences, one fact per leaf, active voice, consistent terms, no vague words. Keep names, dates, and numbers. Write leaves in the SAME LANGUAGE as the conversation (English dialogue → English leaves). If the original wording matters, keep it verbatim as a quote (> …).",
     ],
     parameters: {
       type: "object",
       properties: {
         path: pathParam,
-        leaf: { type: "string", description: "一条叶子事实（短句，可带 ← 日期 标注）" },
+        leaf: { type: "string", description: "一条叶子事实（短句；写入日期自动附加，无需手写）" },
       },
       required: ["path", "leaf"],
     },
     async execute(_toolCallId: string, params: { path: string; leaf: string }) {
       const m = await memory();
-      const r = await m.upsertNode(params.path, params.leaf);
+      const r = await m.upsertNode(params.path, withDate(params.leaf));
       if (r.changed) invalidateToc();
       // 结构守卫（非阻断，只给模型提示）
       const hints: string[] = [];
@@ -268,13 +276,13 @@ export default function memoryExtension(pi: any): void {
       properties: {
         path: pathParam,
         match: { type: "string", description: "要被替换的旧叶子原文（在该节点内需唯一命中）" },
-        leaf: { type: "string", description: "新的叶子文本（可带 ← 日期）" },
+        leaf: { type: "string", description: "新的叶子文本（写入日期自动附加）" },
       },
       required: ["path", "match", "leaf"],
     },
     async execute(_toolCallId: string, params: { path: string; match: string; leaf: string }) {
       const m = await memory();
-      const r = await m.updateNode(params.path, params.match, params.leaf);
+      const r = await m.updateNode(params.path, params.match, withDate(params.leaf));
       if (!r.ok) {
         return text(
           `未替换：在「${params.path}」内未唯一命中旧原文（或路径不存在）。先用 memory_read 查看该节点、逐字复制要替换的叶子。`,
