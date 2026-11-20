@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS episodes(
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at);
 CREATE TABLE IF NOT EXISTS evidence(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   node_path TEXT NOT NULL,

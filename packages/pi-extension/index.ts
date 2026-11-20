@@ -53,7 +53,7 @@ let cache: MemoryFile | null = null;
 // ---------- 采集（P4）状态 ----------
 let lastUserPrompt: string | null = null;
 const CAPTURE_ON = process.env.MEMORY_X_CAPTURE !== "off";
-const EPISODE_MAX = Number(process.env.MEMORY_X_EPISODE_MAX ?? "2000");
+const EPISODE_MAX = Number(process.env.MEMORY_X_EPISODE_MAX ?? "0"); // 0=不裁剪（默认永久保留；设正数可恢复滚动窗口）
 const EPISODE_TEXT_MAX = 4000;
 
 function safeJson(v: unknown): string {
@@ -176,7 +176,7 @@ async function spawnUiInTerminal(argv: string[], cwd: string): Promise<boolean> 
     ["x-terminal-emulator", ["-e", "bash", "-lc", line]],
     ["gnome-terminal", ["--", "bash", "-lc", line]],
     ["konsole", ["-e", "bash", "-lc", line]],
-    ["xfce4-terminal", ["--", "bash", "-lc", line]],
+    ["xfce4-terminal", ["-x", "bash", "-lc", line]],
     ["alacritty", ["-e", "bash", "-lc", line]],
     ["kitty", ["bash", "-lc", line]],
     ["xterm", ["-e", "bash", "-lc", line]],
@@ -664,7 +664,8 @@ export default function memoryExtension(pi: any): void {
         sessionId = null;
       }
       m.captureEpisodes(sessionId, entries);
-      if (m.countEpisodes() > EPISODE_MAX) m.pruneEpisodes(EPISODE_MAX);
+      // 仅在显式设了正数上限时才裁剪（0=永久保留；pruneEpisodes(0) 字面语义是全删，必须挡）
+      if (EPISODE_MAX > 0 && m.countEpisodes() > EPISODE_MAX) m.pruneEpisodes(EPISODE_MAX);
     } catch {
       // 采集失败不阻断会话
     }
