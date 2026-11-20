@@ -7,9 +7,10 @@
  * 沙盒；probe 题在同一会话内提问，判分沿用强模型协议（与 turn-agent 可比）。
  *
  * 用法：
- *   node scripts/halumem-pi-eval.ts                          # 记录1 第1场 session（PoC）
- *   node scripts/halumem-pi-eval.ts --sessions 2             # 前2场
- *   node scripts/halumem-pi-eval.ts --model glm-5.3-flash    # 换模型
+ *   node scripts/halumem-pi-eval.ts                                # 记录1 第1场（默认 glm-5.3-flash + thinking high）
+ *   node scripts/halumem-pi-eval.ts --sessions 2                 # 前2场
+ *   node scripts/halumem-pi-eval.ts --thinking low               # 调 thinking 档位
+ *   node scripts/halumem-pi-eval.ts --model deepseek/deepseek-flash --thinking off   # 换回 flash 关思考
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -34,7 +35,8 @@ function arg(name: string): string | undefined {
 
 const RECORD = Number(arg("record") ?? "1");
 const SESSIONS = Number(arg("sessions") ?? "1");
-const MODEL = arg("model") ?? "deepseek-flash";
+const MODEL = arg("model") ?? "zai-coding-cn/glm-5.3-flash";
+const THINKING = (arg("thinking") ?? "high") as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 const QPS = Number(arg("qps") ?? "0");
 
 // ---------- 沙盒（必须在 extension 模块加载前设置，它在 import 时读 env） ----------
@@ -62,7 +64,7 @@ const probes = sessions.flatMap((s) =>
   })),
 );
 console.log(
-  `pi-live：记录${RECORD} 前${SESSIONS}场 · ${turns.length} user turns · 黄金点 ${expectRemember.length}（更新点 ${expectIgnore.length}）· 题 ${probes.length} · 模型 ${MODEL}\n沙盒：${SANDBOX}\n`,
+  `pi-live：记录${RECORD} 前${SESSIONS}场 · ${turns.length} user turns · 黄金点 ${expectRemember.length}（更新点 ${expectIgnore.length}）· 题 ${probes.length} · 模型 ${MODEL} · thinking ${THINKING}\n沙盒：${SANDBOX}\n`,
 );
 
 // ---------- pi 会话（生产 extension + 生产系统提示词；排掉编码工具只留 memory 工具） ----------
@@ -85,7 +87,7 @@ const { session, extensionsResult } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
   model,
   modelRuntime,
-  thinkingLevel: "off",
+  thinkingLevel: THINKING,
   excludeTools: ["bash", "read", "edit", "write", "grep", "find", "ls"],
 });
 const extErrors = (extensionsResult as any)?.errors ?? (extensionsResult as any)?.warnings ?? [];
