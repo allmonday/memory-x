@@ -4,6 +4,36 @@
 
 **你掌舵，它记图** —— 你在终端和 pi 正常工作；值得长期记住的结论、决策、实体关系，被写进一棵 SQLite 为真相、可检索、可回滚、可"做梦"整理的记忆树。下次对话，目录常驻注入，相关记忆自动召回。
 
+## 快速开始（5 分钟装上）
+
+```bash
+# 前置：Node ≥ 23.6 + 已安装 pi
+npm i -g @earendil-works/pi-coding-agent
+
+git clone https://github.com/allmonday/memory-x.git
+
+# 方式一：全局安装（所有会话生效）
+# 在 ~/.pi/agent/settings.json 里把本扩展加入 extensions 数组：
+#   "extensions": ["/你的路径/memory-x/packages/pi-extension/index.ts"]
+
+# 方式二：单次会话试用
+pi -e /你的路径/memory-x/packages/pi-extension/index.ts
+```
+
+装好后**无需任何配置**：扩展会给 pi 注册 13 个 `memory_*` 工具，并在每轮对话注入记忆目录与相关召回。记忆数据在 `~/memory-x/memory/`（`MEMORY_X_DIR` 可改），**永远在本机**——仓库只有代码，不含任何数据。
+
+使用就是正常对话，不用记命令：
+
+```
+你：「我用 Neovim，主力项目部署在懒猫微服上」     → 自动写入记忆树（带日期戳）
+（三天后的另一场会话）
+你：「我编辑器用什么来着？」                      → 目录+召回命中，直接答出
+你：「昨天/上周三我干了什么？」                    → memory_diary 日记（读穿缓存）
+你：「我之前说偏好 Postgres，现在换 SQLite 了」   → 原地替换旧叶子，不留并存
+```
+
+偶尔用到的命令面：`/memory`（看目录）、`/memory tidy`（做梦整理）、`/memory changes` / `rollback <id>`（版本历史与回滚）、`/memory ui`（浏览器视图）。详见下文「使用」。
+
 ## 架构
 
 四层结构，向下依赖、逐层收敛到唯一真相源：
@@ -48,21 +78,6 @@ flowchart TB
 - **日记（diary）**：`memory_diary` 读穿缓存——按日聚合当天 sessions / 动过的节点 / 素材水位；未缓存则返回原始素材由模型总结落盘 `日记/YYYY-MM-DD`（末行附水位戳），已缓存直接命中并做水位失效检测（之后又有新事件则标注可重建）。历史日期（库启用前）兑底查叶子「← 日期」标记的弱视图。
 - **整理（tidy）**：模型读记忆树（Markdown 只作只读 review 视图）→ 调 `memory_propose(ops)` 提交**结构化操作列表**（`add_leaf`/`update_leaf`/`remove_leaf`/`rename`/`move`/`add_node`/`delete`/`set_note`/`set_summary`）→ **直接落盘为一个版本**（对克隆树先干跑校验，失败整批回滚；成功则按序原子应用）。不重写整棵树，未提及的节点保持不变。本轮 tidy 的变更可在 `/memory changes`（按版本分组）看到，`/memory rollback <id>` 回滚。
 - **可回滚**：任意版本由「当前态 + 逆推 `revision_id > target` 的 undo 行」物化；`/memory rollback <id>` 只是再落一版，不改写历史，因此可前滚。`/memory changes` 的逐条变更由 undo 行 + 物化态**派生**，不另占存储。
-
-## 快速开始
-
-```bash
-git clone https://github.com/allmonday/memory-x.git
-
-# 装进你的 pi（全局）
-# ~/.pi/agent/settings.json:
-#   "extensions": ["<clone路径>/packages/pi-extension/index.ts"]
-
-# 或单次会话试用
-pi -e <clone路径>/packages/pi-extension/index.ts
-```
-
-记忆数据默认在 `~/memory-x/memory/`（`MEMORY_X_DIR` 可改）。**你的记忆永远在本机**——这个仓库只有代码，不含任何数据。
 
 ## 使用
 
