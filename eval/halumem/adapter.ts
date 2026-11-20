@@ -1,17 +1,11 @@
 /**
- * HaluMem → 本框架的场景适配层
- * ============================
- * HaluMem（IAAR-Shanghai，CC-BY-NC-ND-4.0）是操作级的记忆幻觉基准，结构天生对上我们的三阶段：
- *   - 每个 session 的 `memory_points`  → 抽取的黄金点（completeness）+ 幻觉检查
- *   - `is_update=True` + `original_memories` → 更新/supersede（旧值应被替换）
- *   - 每个 session 的 `questions`（带 question_type）→ 召回/多跳/冲突/边界（拒绝）
- *
- * 映射约定：一个 session = 一条 observation（整段对话）；问题按 question_type 打 tag。
- * turnLevel: true 时改为逐 turn 展开（id 形如 s3-t5），供 turn-agent 仿真模式使用。
+ * HaluMem → pi-live 评测的数据装载
+ * ==============================
+ * HaluMem（IAAR-Shanghai，CC-BY-NC-ND-4.0）record = 一个 persona 的完整对话史。
+ * loadRecord 展开为 pi-live 所需形态：逐 user turn（原文，无前缀）、黄金点、
+ * 更新对（旧值应被新值替换）、probe 题（question_type 打 tag；Memory Boundary=对抗题）。
  * 数据集不落仓库（许可限制），从缓存/上游读取。
  */
-import type { Observation, Probe, Scenario } from "../memory/harness.ts";
-
 export interface HaluMemMemoryPoint {
   index: number;
   memory_content: string;
@@ -41,51 +35,50 @@ export interface HaluMemRecord {
   sessions: HaluMemSession[];
 }
 
-export interface AdapterOpts {
-  maxSessions?: number;
-  maxQuestionsPerSession?: number;
-  /** 逐 turn 展开 observation（turn-agent 仿真用） */
-  turnLevel?: boolean;
+export interface Probe {
+  question: string;
+  answer?: string | null;
+  /** 对抗题：材料里没有的信息，应拒绝作答而非编造 */
+  refuse?: boolean;
+  /** 分类标签（HaluMem question_type），分桶统计 */
+  tag?: string;
 }
 
-/** HaluMem 记录 → 我们的 Scenario */
-export function toScenario(rec: HaluMemRecord, opts: AdapterOpts = {}): Scenario {
-  const sessions = rec.sessions.slice(0, opts.maxSessions ?? rec.sessions.length);
-  const observations: Observation[] = [];
+/** 更新对：同一事实的旧表述应被新表述替换（supersede 考核单元） */
+export interface ReplacePair {
+  old: string;
+  neu: string;
+}
+
+export interface RecordCase {
+  /** user 发言原文（时间序；assistant 轮不喂——pi 会话里由被测 agent 自己生成回复） */
+  turns: string[];
+  /** 黄金点（非更新）：该被记住的事实 */
+  expectRemember: string[];
+  /** 更新对：旧值应被替换为新值 */
+  expectReplace: ReplacePair[];
+  /** 问答探针 */
+  probes: Probe[];
+}
+
+export function loadRecord(rec: HaluMemRecord, opts: { sessions?: number; qps?: number } = {}): RecordCase {
+  const sessions = rec.sessions.slice(0, opts.sessions ?? rec.sessions.length);
+  const turns = sessions.flatMap((s) => s.dialogue.filter((t) => t.role === "user").map((t) => t.content));
   const expectRemember: string[] = [];
-  const expectIgnore: string[] = [];
-  const probes: Probe[] = [];
-
-  sessions.forEach((s, i) => {
-    if (opts.turnLevel) {
-      // 提速：只喂 user turn（assistant 几乎全是对用户发言的复述/夸奖，无新事实）
-      s.dialogue.forEach((t, j) => {
-        if (t.role !== "user") return;
-        observations.push({ id: `s${i + 1}-t${j + 1}`, date: t.timestamp ?? s.end_time, text: `${t.role}: ${t.content}` });
-      });
-    } else {
-      const text = s.dialogue.map((t) => `${t.role}: ${t.content}`).join("\n");
-      observations.push({ id: `s${i + 1}`, date: s.end_time, text });
-    }
+  const expectReplace: ReplacePair[] = [];
+  for (const s of sessions)
     for (const mp of s.memory_points ?? []) {
-      expectRemember.push(mp.memory_content);
-      if (mp.is_update === "True") expectIgnore.push(...(mp.original_memories ?? []));
+      if (mp.is_update === "True") {
+        for (const old of mp.original_memories ?? []) expectReplace.push({ old, neu: mp.memory_content });
+      } else expectRemember.push(mp.memory_content);
     }
-    const qs = (s.questions ?? []).slice(0, opts.maxQuestionsPerSession ?? Infinity);
-    for (const q of qs) {
-      const refuse = q.question_type === "Memory Boundary";
-      probes.push({ question: q.question, answer: refuse ? null : q.answer, kind: refuse ? "refuse" : "answer", tag: q.question_type });
-    }
-  });
-
-  return {
-    id: rec.uuid,
-    title: rec.persona_info?.slice(0, 60),
-    competency: "extraction",
-    ingest: "llm",
-    observations,
-    expectRemember,
-    expectIgnore,
-    probes,
-  };
+  const probes: Probe[] = sessions.flatMap((s) =>
+    (s.questions ?? []).slice(0, opts.qps || undefined).map((q) => ({
+      question: q.question,
+      answer: q.question_type === "Memory Boundary" ? null : q.answer,
+      refuse: q.question_type === "Memory Boundary",
+      tag: q.question_type,
+    })),
+  );
+  return { turns, expectRemember, expectReplace, probes };
 }

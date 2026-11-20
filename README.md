@@ -122,7 +122,7 @@ npm link && memory-x ui         # 装成全局命令后，任意目录可用（�
 
 ```bash
 npm test              # 80 项：文法/路径/操作/存储/版本回滚/检索/整理/迁移/锁/fuzz/并发写
-npm run eval          # 检索质量评估（hit@1/@3/MRR；当前 0.73，题集本地保存不入库）
+npm run eval:halumem   # HaluMem 记忆评测（pi-live：pi SDK 真实会话 × 生产 extension，见 eval/halumem/README.md）
 npm run crash-verify  # 写入中 SIGKILL，验证 db 完好（WAL）
 ```
 
