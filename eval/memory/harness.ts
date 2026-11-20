@@ -82,6 +82,34 @@ export function coveredBy(a: string, bTokens: Set<string>, ratio = 0.6): boolean
   return w.filter((x) => bTokens.has(x)).length / w.length >= ratio;
 }
 
+/** 新叶子末尾附加对话日期（已含则不重复）——机械保证时间锚点，不依赖模型自觉 */
+function withDate(text: string, date?: string): string {
+  if (!date || text.includes(date) || /←\s*\d{4}-\d{2}-\d{2}/.test(text)) return text;
+  return `${text} ← ${date}`;
+}
+
+/** 全树节点路径清单（供 ADD 同标题重定向） */
+function nodePaths(mf: MemoryFile): string[] {
+  const out: string[] = [];
+  const walk = (n: any, path: string) => {
+    for (const c of n.children) {
+      const p = path ? `${path}/${c.title}` : c.title;
+      out.push(p);
+      walk(c, p);
+    }
+  };
+  walk(mf.root, "");
+  return out;
+}
+
+/** ADD 路径规范化：末段标题在树中已有唯一同标题节点 → 重定向（防重复主题节点分裂，下钻才看得见旧值） */
+function canonicalAddPath(mf: MemoryFile, path: string): string {
+  const title = path.split("/").pop()!.trim().toLowerCase();
+  if (!title) return path;
+  const same = nodePaths(mf).filter((p) => p.split("/").pop()!.trim().toLowerCase() === title);
+  return same.length === 1 && same[0] !== path ? same[0]! : path;
+}
+
 function allLeaves(mf: MemoryFile): string[] {
   const out: string[] = [];
   const walk = (n: { leaves: string[]; children: any[] }) => {
@@ -144,6 +172,7 @@ async function applyOps(
   mf: MemoryFile,
   raw: string,
   failedOut?: string[],
+  date?: string,
 ): Promise<{ adds: number; updates: number; failed: number }> {
   let adds = 0, updates = 0, failed = 0;
   for (const line of raw.split("\n")) {
@@ -152,7 +181,7 @@ async function applyOps(
     const a = !u && /^ADD\b/i.test(t) ? t.replace(/^ADD\s*/i, "").split("|").map((x) => x.trim()) : null;
     try {
       if (u && u.length >= 3 && u[0] && u[1] && u[2]) {
-        const nw = u.slice(2).join(" | ");
+        const nw = withDate(u.slice(2).join(" | "), date);
         let r = await mf.updateNode(u[0], u[1], nw);
         if (!r.changed) {
           // 兑底 1：旧值全树唯一逐字命中（裸名/错节点路径被纠正）
@@ -182,7 +211,7 @@ async function applyOps(
           failedOut?.push(t);
         }
       } else if (a && a.length >= 2 && a[0] && a[1]) {
-        await mf.upsertNode(a[0], a.slice(1).join(" | "));
+        await mf.upsertNode(canonicalAddPath(mf, a[0]), withDate(a.slice(1).join(" | "), date));
         adds++;
       } else if (t && !/^NOOP$/i.test(t) && !/^SEARCH\s/i.test(t)) {
         failed++;
@@ -218,13 +247,21 @@ async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: 
     let recent: string[] = [];
     let lastSession: string | null = null;
     const stats = { adds: 0, updates: 0, failed: 0, searches: 0, drills: 0, failedLines: [] as string[] };
+    let seenTurns = new Set<string>();
     for (let i = 0; i < s.observations.length; i++) {
       const o = s.observations[i]!;
       const sess = o.id?.split("-t")[0] ?? `obs-${i}`;
       if (sess !== lastSession) {
         recent = [];
         lastSession = sess;
+        seenTurns = new Set();
       }
+      // 提速：session 内逐字重复的 turn 直接跳过（合成数据 ~17% 重复，重复发言不新增信息）
+      if (seenTurns.has(o.text)) {
+        stats.skipped = (stats.skipped ?? 0) + 1;
+        continue;
+      }
+      seenTurns.add(o.text);
       const toc = tocDigest(mf.root, { maxChars: TOC_MAX });
       const recentCtx = recent.slice(-2).join("\n");
       const provided = new Set<string>();
@@ -279,7 +316,7 @@ async function ingest(mf: MemoryFile, s: Scenario, llm: LlmClient | null, mode: 
           2000,
         );
       }
-      const r = await applyOps(mf, raw, stats.failedLines);
+      const r = await applyOps(mf, raw, stats.failedLines, o.date);
       stats.adds += r.adds;
       stats.updates += r.updates;
       stats.failed += r.failed;

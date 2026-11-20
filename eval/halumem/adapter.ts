@@ -58,9 +58,11 @@ export function toScenario(rec: HaluMemRecord, opts: AdapterOpts = {}): Scenario
 
   sessions.forEach((s, i) => {
     if (opts.turnLevel) {
-      s.dialogue.forEach((t, j) =>
-        observations.push({ id: `s${i + 1}-t${j + 1}`, date: t.timestamp ?? s.end_time, text: `${t.role}: ${t.content}` }),
-      );
+      // 提速：只喂 user turn（assistant 几乎全是对用户发言的复述/夸奖，无新事实）
+      s.dialogue.forEach((t, j) => {
+        if (t.role !== "user") return;
+        observations.push({ id: `s${i + 1}-t${j + 1}`, date: t.timestamp ?? s.end_time, text: `${t.role}: ${t.content}` });
+      });
     } else {
       const text = s.dialogue.map((t) => `${t.role}: ${t.content}`).join("\n");
       observations.push({ id: `s${i + 1}`, date: s.end_time, text });
