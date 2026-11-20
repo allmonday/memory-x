@@ -280,6 +280,11 @@ export class MemoryFile {
     return this.store.countEpisodes();
   }
 
+  /** 按本地日历日聚合当天活动（sessions + 动过的节点 + 素材水位），日记派生与缓存失效判定用。 */
+  dayDigest(date: string): DayDigest {
+    return this.store.dayDigest(date);
+  }
+
   pruneEpisodes(keep: number): number {
     return this.store.pruneEpisodes(keep);
   }

@@ -570,6 +570,65 @@ export default function memoryExtension(pi: any): void {
   gateTidyWrites(pi);
 
   pi.registerTool({
+    name: "memory_diary",
+    label: "日记",
+    description:
+      "查询某天的活动日记（读穿缓存：未缓存则返回当天原始素材并提示生成；已缓存则直接返回缓存内容并做陈旧检测）。日期省略=今天。",
+    promptSnippet: "查某天的活动日记",
+    promptGuidelines: [
+      "Use memory_diary when the user asks what happened / what was done on a given date. If the tool returns raw material (cache miss), summarize it and persist with memory_write_note to the indicated path (日记/YYYY-MM-DD), keeping the watermark line intact — subsequent queries then hit the cache.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "YYYY-MM-DD；省略=今天" },
+      },
+      required: [],
+    },
+    async execute(_toolCallId: string, params: { date?: string }) {
+      const m = await memory();
+      const local = new Date();
+      const today = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, "0")}-${String(local.getDate()).padStart(2, "0")}`;
+      const date = params.date?.trim() || today;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return text(`日期格式应为 YYYY-MM-DD：${date}`);
+      const path = `日记/${date}`;
+      // 缓存命中：返回缓存内容 + 水位比对（之后又有新事件 → 标注陈旧）
+      const sec = m.readSection(path);
+      if (sec) {
+        const body = sec.node.content || sec.node.leaves.join("\n");
+        const wm = body.match(/素材水位[：:]\s*episodes?\s*≤\s*(\d+).*?revisions?\s*≤\s*(\d+)/);
+        let stale = "";
+        if (wm) {
+          const d = m.dayDigest(date);
+          if (d.watermark.maxEpisodeId > Number(wm[1]) || d.watermark.maxRevisionId > Number(wm[2]))
+            stale = `\n\n⚠️ 缓存之后该日又有新事件（现水位 episodes ≤ ${d.watermark.maxEpisodeId} · revisions ≤ ${d.watermark.maxRevisionId}），如需最新可要求重建日记。`;
+        }
+        return text(`【缓存】${path}\n\n${body}${stale}`);
+      }
+      // 缓存未建：返回原始素材 + 生成指引
+      const d = m.dayDigest(date);
+      if (d.empty) return text(`${date} 无记录（当天无 episodes、无写操作）。`);
+      const lines = [
+        `【素材·未缓存】${date}`,
+        "",
+        ...d.sessions.map((s, i) => {
+          const sid = s.sessionId ? s.sessionId.slice(0, 8) : "（无会话号）";
+          const samples = s.userSamples.map((u) => `\n    · ${u}`).join("");
+          return `Session ${i + 1}（${sid}…）：${s.events} 事件 · ${s.tools} 工具调用 · ${s.replies} 条回复\n    开场：${s.firstUser ?? "（无用户发言）"}${samples}`;
+        }),
+        "",
+        "动过的节点（写入次数）：",
+        ...d.nodes.map((n) => `  · ${n.path}（${n.ops}）`),
+        "",
+        `→ 请把当天活动总结成日记，用 memory_write_note 写入 ${path}：`,
+        "   正文用 Markdown：每个 session 一句话主题 + 涉及的项目/节点路径（保持原路径以便交叉验证）；",
+        `   末尾必须附一行「> 素材水位：episodes ≤ ${d.watermark.maxEpisodeId} · revisions ≤ ${d.watermark.maxRevisionId}」（缓存失效检测用）。`,
+      ];
+      return text(lines.join("\n"));
+    },
+  });
+
+  pi.registerTool({
     name: "memory_stats",
     label: "记忆统计",
     description: "记忆树的规模统计（节点数/叶子数/顶层域）",

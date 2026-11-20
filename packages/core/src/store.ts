@@ -203,6 +203,24 @@ export function leafHash(leaf: string): string {
 }
 
 /** 原始事件（会话/工具记录，逐字保存）。 */
+/** 按日聚合结果：日记派生的素材。 */
+export interface DayDigest {
+  date: string;
+  sessions: Array<{
+    sessionId: string | null;
+    events: number;
+    tools: number;
+    replies: number;
+    firstUser: string | null;
+    userSamples: string[];
+  }>;
+  /** 动过的节点（聚合到前 3 层路径）及写入次数 */
+  nodes: Array<{ path: string; ops: number }>;
+  /** 素材水位：日记缓存据此判失效（当天又有新事件/新写入则需重建） */
+  watermark: { maxEpisodeId: number; maxRevisionId: number };
+  empty: boolean;
+}
+
 export interface Episode {
   id: number;
   sessionId: string | null;
@@ -1079,6 +1097,60 @@ export class MemoryStore {
       `DELETE FROM episodes WHERE id NOT IN (SELECT id FROM episodes ORDER BY id DESC LIMIT ${k})`,
     );
     return before - this.countEpisodes();
+  }
+
+  /** 按本地日历日聚合：sessions（episodes 分组）+ 动过的节点（changes 聚合到前 3 层路径）+ 素材水位。 */
+  dayDigest(date: string): DayDigest {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`日期格式应为 YYYY-MM-DD：${date}`);
+    const day = (col: string) => `date(${col}, 'localtime') = '${date}'`; // date 已过正则校验
+    const sessions = (
+      this.db
+        .prepare(
+          `SELECT session_id AS sid, COUNT(*) AS events,
+                  SUM(CASE WHEN kind='tool_result' THEN 1 ELSE 0 END) AS tools,
+                  SUM(CASE WHEN kind='assistant' THEN 1 ELSE 0 END) AS replies,
+                  MIN(CASE WHEN kind='user' THEN text END) AS firstUser
+           FROM episodes WHERE ${day("created_at")} GROUP BY session_id ORDER BY MIN(id)`,
+        )
+        .all() as Array<{ sid: string | null; events: number; tools: number; replies: number; firstUser: string | null }>
+    ).map((r) => ({
+      sessionId: r.sid,
+      events: r.events,
+      tools: r.tools,
+      replies: r.replies,
+      firstUser: r.firstUser?.slice(0, 80) ?? null,
+      userSamples: (
+        this.db
+          .prepare(
+            `SELECT text FROM episodes WHERE ${day("created_at")} AND kind='user' AND session_id IS ? ORDER BY id LIMIT 3`,
+          )
+          .all(r.sid) as Array<{ text: string }>
+      ).map((x) => x.text.slice(0, 100)),
+    }));
+    const touchedRows = this.db
+      .prepare(
+        `SELECT c.path AS path FROM changes c
+         JOIN revisions r ON r.id = c.revision_id
+         WHERE ${day("r.created_at")}`,
+      )
+      .all() as Array<{ path: string }>;
+    // 精确路径分组，再只保留最深路径（中间祖先节点的创建行折叠进后代，一次逻辑写入不出多条）
+    const exact = new Map<string, number>();
+    for (const t of touchedRows) exact.set(t.path, (exact.get(t.path) ?? 0) + 1);
+    const paths = [...exact.keys()];
+    const nodes = paths
+      .filter((p) => !paths.some((q) => q.startsWith(p + "/")))
+      .map((p) => ({ path: p, ops: exact.get(p)! }))
+      .sort((a, b) => b.ops - a.ops);
+    const maxId = (table: string) =>
+      (this.db.prepare(`SELECT MAX(id) AS m FROM ${table} WHERE ${day(table === "episodes" ? "created_at" : "created_at")}`).get() as { m: number | null }).m ?? 0;
+    return {
+      date,
+      sessions,
+      nodes,
+      watermark: { maxEpisodeId: maxId("episodes"), maxRevisionId: maxId("revisions") },
+      empty: sessions.length === 0 && touchedRows.length === 0,
+    };
   }
 
   linkEvidence(nodePath: string, leafHashValue: string, episodeIds: number[]): void {
