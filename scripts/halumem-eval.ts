@@ -100,17 +100,20 @@ session.subscribe((ev: any) => {
   if (ev.type === "compaction_end") toolStats["__compaction__"] = (toolStats["__compaction__"] ?? 0) + 1;
 });
 
-// ---------- 写入阶段：逐 turn 真实对话 ----------
+// ---------- 写入阶段：逐 turn 真实对话（带对话日期：机械日期戳与题目 as-of 日期对齐） ----------
 const t0 = Date.now();
 try {
   for (let i = 0; i < turns.length; i++) {
     const turn = turns[i]!;
+    process.env.MEMORY_X_DATE = turn.date ?? ""; // withDate 优先用显式日期（无效值回退今天）
+    const prompt = turn.date ? `[${turn.date}] ${turn.content}` : turn.content;
     const elapsed = ((Date.now() - t0) / 60000).toFixed(1);
-    console.log(`▶ turn ${i + 1}/${turns.length}（${elapsed}min） ${turn.replace(/\n/g, " ").slice(0, 60)}`);
-    await session.prompt(turn);
+    console.log(`▶ turn ${i + 1}/${turns.length}（${elapsed}min） ${prompt.replace(/\n/g, " ").slice(0, 60)}`);
+    await session.prompt(prompt);
     const reply = session.getLastAssistantText() ?? "";
     console.log(`  ↳ 回复 ${reply.length} 字符`);
   }
+  delete process.env.MEMORY_X_DATE; // QA 阶段不再指定日期
 
   // ---------- 问答阶段：同一会话内提问 ----------
   const judge = LlmClient.fromEnv(process.env.EVAL_JUDGE_MODEL ?? "glm-5.3", { thinking: "auto" });

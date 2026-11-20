@@ -40,11 +40,16 @@ const AUTO_INJECT_MIN_SCORE = Number(process.env.MEMORY_X_INJECT_MIN ?? "1.0");
  */
 const WRITE_STYLE = "短句、一句一事、主动语态、术语一致、去修饰；保留人名/日期/数字/专有名词；原文或摘要重要时用引用块（> …）原样保留；事实行用与对话相同的语言书写（对话是英文就写英文，不要换语言）。";
 
-/** 新叶子末尾机械附加今天日期（已含日期则不重复）——时间锚点不依赖模型自觉 */
+/** 新叶子末尾机械附加日期（已含则不重复）——时间锚点不依赖模型自觉；MEMORY_X_DATE 可显式指定“今天”（replay/测试用） */
 function withDate(leaf: string): string {
   if (/←\s*\d{4}-\d{2}-\d{2}/.test(leaf)) return leaf;
-  const d = new Date();
-  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const env = process.env.MEMORY_X_DATE;
+  let today: string;
+  if (env && /^\d{4}-\d{2}-\d{2}$/.test(env)) today = env;
+  else {
+    const d = new Date();
+    today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
   return `${leaf} ← ${today}`;
 }
 

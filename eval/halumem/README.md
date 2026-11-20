@@ -32,6 +32,9 @@ HaluMem-Medium.jsonl（CC-BY-NC-ND-4.0，不落仓库）：20 条 record（各 5
 ## 历史参考分数（口径已换，勿直接对比）
 
 - turn-agent 仿真（已移除，git 历史可查）：记录1 全量 0.720–0.75 带宽（±8 题判分噪声），提示词在记录1 上调参过，偏乐观。
-- pi-live 冒烟（记录1 前8场，glm-5.3-flash + thinking high）：问答 17/20 = 0.85，recall 0.907，precision 叶级 0.917（全树词面口径为 0.000，真过期仅 2/24）。已知缺口：偏好/关系类**软更新**不触发替换（并列失替，4 案例）。
-- 已修并验证：extension 语言一致性规则（英文对话→英文叶子，recall 0.400→1.000 于第1场）；叶子日期机械注入。
-- 遗留：HaluMem 近义改写型更新点占多数，词面 recall/precision 只作参考；Dynamic Update 题桶需全量（65 场）才有样本。
+- pi-live 全量（记录1 65场，glm-5.3-flash + thinking high，324min）：**问答 0.701**（115/164），recall 0.984 史上最高，precision 叶级 0.861（25/180 过期，软更新模式）。49 道失败中 **33 道为「日期锚定拒答」**：机械日期戳=写入日 vs 题目 as-of 对话日期——replay 保真度问题，非生产 bug（真实使用写入日=对话日）。
+- **日期修复（2026-11-21）**：评测脚本逐 turn 喂对话日期（turn 前缀 [YYYY-MM-DD] + MEMORY_X_DATE 指定机械戳的「今天」），叶子日期戳变为真实对话日期。
+- **定向验证（前 15 场重跑，54min）**：同 40 题 **0.600 → 0.825**（+9 题）；日期拒答题翻转率 ~80%（10 道翻正 / 3 道回归 / 2 道仍错但已非日期原因）；Basic Recall 8/8、Multi-hop 4/4 全对。**全量外推 ≈ 0.82–0.86**（115 + 33×0.8 − 回归），待全量重跑确认。
+- 已修并验证：extension 语言一致性规则（recall 0.400→1.000）；叶子日期机械注入（MEMORY_X_DATE 可指定）。
+- 已知缺口：偏好/关系类软更新并列失替（Labradors→Golden Retriever、Susan/Daniel 等，precision 主要失分点）；career 后期演变（2033 job title）。
+- 遗留：HaluMem 近义改写型更新点占多数，词面 recall/precision 只作参考；compaction 全程未触发（1403 turns）；token 用量未记录（脚本缺口）。

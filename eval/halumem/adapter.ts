@@ -51,8 +51,8 @@ export interface ReplacePair {
 }
 
 export interface RecordCase {
-  /** user 发言原文（时间序；assistant 轮不喂——pi 会话里由被测 agent 自己生成回复） */
-  turns: string[];
+  /** user 发言（时间序；assistant 轮不喂——pi 会话里由被测 agent 自己生成回复）；date=对话日期（ISO） */
+  turns: Array<{ content: string; date: string | null }>;
   /** 黄金点（非更新）：该被记住的事实 */
   expectRemember: string[];
   /** 更新对：旧值应被替换为新值 */
@@ -63,7 +63,19 @@ export interface RecordCase {
 
 export function loadRecord(rec: HaluMemRecord, opts: { sessions?: number; qps?: number } = {}): RecordCase {
   const sessions = rec.sessions.slice(0, opts.sessions ?? rec.sessions.length);
-  const turns = sessions.flatMap((s) => s.dialogue.filter((t) => t.role === "user").map((t) => t.content));
+  const isoDate = (s?: string): string | null => {
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isNaN(d.getTime())
+      ? null
+      : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const turns = sessions.flatMap((s) => {
+    const fallback = isoDate(s.end_time);
+    return s.dialogue
+      .filter((t) => t.role === "user")
+      .map((t) => ({ content: t.content, date: isoDate(t.timestamp) ?? fallback }));
+  });
   const expectRemember: string[] = [];
   const expectReplace: ReplacePair[] = [];
   for (const s of sessions)
