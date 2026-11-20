@@ -15,7 +15,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { MemoryFile, tocDigest } from "../../packages/core/src/index.ts";
 import { LlmClient } from "../llm.ts";
-import { AGENT_WRITE_SYSTEM, ANSWER_SYSTEM, EXTRACT_SYSTEM, JUDGE_SYSTEM, REFUSE_SYSTEM, SUPERSEDE_SYSTEM, agentWriteUser, answerUser, extractUser, judgeUser, refuseUser, supersedeUser } from "./prompts.ts";
+import { AGENT_WRITE_SYSTEM, ANSWER_SYSTEM, EXTRACT_SYSTEM, HISTORY_RULE, JUDGE_SYSTEM, REFUSE_SYSTEM, SUPERSEDE_SYSTEM, agentWriteUser, answerUser, extractUser, judgeUser, refuseUser, supersedeUser } from "./prompts.ts";
 
 export interface Observation {
   id?: string;
@@ -332,19 +332,21 @@ export function historyTimeline(mf: MemoryFile, pathQuery: string, maxChars = 30
   return out;
 }
 
-/** 两阶段问答：模型可请求 HISTORY 获得版本时间线后再作答（让模型自判是否需要历史） */
+/** 两阶段问答：模型可请求 HISTORY 获得版本时间线后再作答（EVAL_HISTORY=1 启用；默认关——无对话日期锚点时版本史会误导 as-of 题） */
 export async function answerProbe(
   mf: MemoryFile,
   llm: LlmClient,
   question: string,
   ctx: string,
 ): Promise<{ pred: string; historyUsed: boolean; historyPath?: string }> {
-  let pred = (await llm.chat(ANSWER_SYSTEM, answerUser(ctx, question))).trim();
+  const historyEnabled = process.env.EVAL_HISTORY === "1";
+  const system = historyEnabled ? `${ANSWER_SYSTEM}\n${HISTORY_RULE}` : ANSWER_SYSTEM;
+  let pred = (await llm.chat(system, answerUser(ctx, question))).trim();
   const hm = pred.match(/^HISTORY\s+(.+)$/im);
-  if (hm?.[1]?.trim()) {
+  if (historyEnabled && hm?.[1]?.trim()) {
     const path = hm[1].trim();
     const hist = historyTimeline(mf, path);
-    pred = (await llm.chat(ANSWER_SYSTEM, answerUser(ctx, question, hist || "（该路径无变更记录）"))).trim();
+    pred = (await llm.chat(system, answerUser(ctx, question, hist || "（该路径无变更记录）"))).trim();
     return { pred, historyUsed: true, historyPath: path };
   }
   return { pred, historyUsed: false };

@@ -100,8 +100,11 @@ export const ANSWER_SYSTEM = [
   "- If excerpts conflict, prefer the most recent / updated fact and ignore outdated ones.",
   "- Combine facts across excerpts; be concise and specific (names, dates, numbers).",
   "- Only say 'I don't know' if NO excerpt contains anything about the subject.",
-  "- If the question asks about CHANGES / HISTORY / EVOLUTION (how X changed, what X used to be, previous values) and the excerpts only show the current state: output exactly one line `HISTORY <path>` (path = the most relevant section path from the excerpts). You will then receive the change timeline to answer from.",
 ].join("\n");
+
+/** HISTORY 协议附加规则（EVAL_HISTORY=1 时启用；无对话日期锚点时版本史会误导 as-of 类问题，默认关闭） */
+export const HISTORY_RULE =
+  "- If the question asks about CHANGES / HISTORY / EVOLUTION (how X changed, what X used to be, previous values) and the excerpts only show the current state: output exactly one line `HISTORY <path>` (path = the most relevant section path from the excerpts). You will then receive the change timeline to answer from.";
 
 export function answerUser(context: string, question: string, history?: string): string {
   return [
