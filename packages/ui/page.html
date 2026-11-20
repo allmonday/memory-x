@@ -427,14 +427,71 @@ async function showSearch(q) {
   });
 }
 
+// ---------- 时间展示：DB 存 UTC，前端转本地 + 近 3 天用相对时间 ----------
+const REL_WINDOW_MS = 3 * 24 * 3600 * 1000; // 3 天内用“1 小时前”，更早用本地绝对时间
+
+/** SQLite `datetime('now')` 给出的是无时区的 UTC 文本（YYYY-MM-DD HH:MM:SS）→ 按 UTC 解析 */
+function parseUtc(s) {
+  if (!s) return null;
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/.exec(String(s));
+  const d = m ? new Date(`${m[1]}T${m[2]}Z`) : new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+const pad2 = (n) => String(n).padStart(2, "0");
+
+/** 本地时区的绝对时间（同年省略年份，避免列太宽） */
+function localAbs(d) {
+  const md = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}-${md}`;
+}
+
+/** hover 用的完整本地时间 + 时区偏移 */
+function localFull(d) {
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const abs = Math.abs(off);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} `
+    + `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} `
+    + `UTC${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+}
+
+/** 人读相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 */
+function relTime(ms) {
+  if (ms < 60_000) return "刚刚";
+  const min = Math.floor(ms / 60_000);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  return `${Math.floor(hr / 24)} 天前`;
+}
+
+function fmtTime(s) {
+  const d = parseUtc(s);
+  if (!d) return "";
+  const ms = Date.now() - d.getTime();
+  return ms >= 0 && ms < REL_WINDOW_MS ? relTime(ms) : localAbs(d);
+}
+
+/** 相对时间会随时间推移变化 → 轮询时顺带刷新已渲染的时间文本 */
+function refreshTimes() {
+  document.querySelectorAll(".time[data-utc]").forEach((el) => {
+    el.textContent = fmtTime(el.dataset.utc);
+  });
+}
+
 async function showHistory() {
   switchView("#v-history");
   const { revisions } = await api("/api/revisions?limit=100");
-  $("#v-history").innerHTML = revisions.map((r) => `
+  $("#v-history").innerHTML = revisions.map((r) => {
+    const d = parseUtc(r.createdAt);
+    const tip = d ? ` title="${esc(localFull(d))}"` : "";
+    return `
     <div class="rev-item" data-id="${r.id}">
       <span class="id">#${r.id}</span><span class="op">${esc(r.op)}</span>
-      <span>${esc(r.path ?? "")}${r.detail ? ` · ${esc(r.detail)}` : ""}</span><span class="time">${r.createdAt}</span>
-    </div>`).join("") || `<div class="empty">暂无历史</div>`;
+      <span>${esc(r.path ?? "")}${r.detail ? ` · ${esc(r.detail)}` : ""}</span><span class="time" data-utc="${esc(r.createdAt)}"${tip}>${esc(fmtTime(r.createdAt))}</span>
+    </div>`;
+  }).join("") || `<div class="empty">暂无历史</div>`;
   $("#v-history").querySelectorAll(".rev-item").forEach((el) => {
     el.onclick = async () => {
       const wasOpen = el.classList.contains("open");
@@ -520,6 +577,7 @@ window.addEventListener("hashchange", () => {
   renderTree();
 });
 setInterval(async () => {
+  refreshTimes();
   try {
     const ping = await api("/api/ping");
     if (ping.latest !== lastRev && lastRev !== -1) refresh();
