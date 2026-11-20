@@ -93,6 +93,7 @@ flowchart TB
 /memory rollback <id>      # 回滚到指定版本（历史保留，可再滚回来）
 /memory stats              # 规模统计
 /memory dump [--full] [文件]  # 整树导出
+/memory ui                 # 在独立终端拉起只读 Web UI（见下文）
 ```
 
 **整理（做梦）的安全设计**：方案只进草稿不落盘；整理模式下所有写工具被 `tool_call` 拦截器封禁；落盘前人审 diff（+N/-N 行）；apply 后仍可 rollback。支持**局部整理**——指定节点（或弹树选择）只重写该子树，且原样保留其 `content`（完整信息），不动树中其它部分。
@@ -139,6 +140,13 @@ npm link && memory-x ui         # 装成全局命令后，任意目录可用（�
 
 前台运行，**Ctrl-C 退出**（无 daemon/pidfile）。端口已有 UI 在跑时自动复用。
 在 pi 内也可用 `/memory ui`：它会在**独立终端**里拉起该进程（不会占用 pi 终端，也不随 pi 退出而死）。
+
+功能面：
+
+- **树视图**：左侧目录树（[n]=叶子数），右侧节点内容（叶子列表 + `content` 正文按 Markdown 渲染）
+- **全文搜索**：顶部搜索框（与 `memory_search` 同源 FTS，命中高亮）
+- **版本历史**：右侧版本列表（结构化 changes，每条变更显示 OLD→NEW；时间按本地时区展示，近 3 天用相对时间）；点任意版本可看与当前的**着色 diff**（绿增/红删），并提示对应 `/memory rollback <id>` 命令
+- **lint 视图**：结构守卫提示（深层嵌套/叶子过多等，与 `/memory` 的软提示同源）
 
 ## 测试与评估
 
