@@ -1,11 +1,12 @@
 /**
- * HaluMem 评估入口
+ * HaluMem 评估入口（主测试集）
  * =================
+ * 模拟真实使用闭环：逐 turn 输入对话 → 记忆管家沉淀知识 → 单轮问答探针 → 强模型判分。
  * 用法：
- *   npm run eval:halumem                          # 用缓存/下载的 Medium，评第 1 条记录前 8 个 session
- *   npm run eval:halumem -- --records 2 --sessions 10
- *   npm run eval:halumem -- --start-record 2 --records 1   # 留出验证：只跑第 2 条（从未参与调参）
- *   npm run eval:halumem -- --mode mechanical     # 机械建树对照
+ *   npm run eval:halumem                            # turn-agent 仿真，第 1 条记录前 8 sessions（冒烟）
+ *   npm run eval:halumem -- --sessions 65           # 记录 1 全量（65 sessions / 164 题）
+ *   npm run eval:halumem -- --start-record 2 --sessions 65   # 留出验证：记录 2 从未参与调参
+ *   npm run eval:halumem -- --mode llm              # 消融对照（诊断用，见 README「诊断工具」）
  *
  * 数据集：HaluMem-Medium.jsonl（CC-BY-NC-ND-4.0），不落仓库：
  *   --data <path> > $HALUMEM_DATA > ~/.cache/memory-x/halumem/... > 从 HuggingFace 下载。
@@ -29,7 +30,7 @@ const RECORDS = Number(arg("records") ?? "1");
 const START_RECORD = Number(arg("start-record") ?? "1"); // 从第 N 条记录开始（留出验证：跳过曾用于调参的记录 1）
 const SESSIONS = Number(arg("sessions") ?? "8");
 const QPS = Number(arg("qps") ?? "0"); // 每 session 最多几题；0=不限
-const MODE = (arg("mode") ?? "llm") as "llm" | "mechanical" | "llm-update" | "turn-agent";
+const MODE = (arg("mode") ?? "turn-agent") as "llm" | "mechanical" | "llm-update" | "turn-agent"; // 默认主路径=turn-agent（真实闭环仿真）；其余模式为诊断消融
 const RUN_DIR = resolve("eval/halumem/runs", new Date().toISOString().replace(/[:.]/g, "-"));
 
 async function datasetPath(): Promise<string> {
