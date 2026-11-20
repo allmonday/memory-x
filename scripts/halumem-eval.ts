@@ -4,6 +4,7 @@
  * 用法：
  *   npm run eval:halumem                          # 用缓存/下载的 Medium，评第 1 条记录前 8 个 session
  *   npm run eval:halumem -- --records 2 --sessions 10
+ *   npm run eval:halumem -- --start-record 2 --records 1   # 留出验证：只跑第 2 条（从未参与调参）
  *   npm run eval:halumem -- --mode mechanical     # 机械建树对照
  *
  * 数据集：HaluMem-Medium.jsonl（CC-BY-NC-ND-4.0），不落仓库：
@@ -25,6 +26,7 @@ function arg(name: string): string | undefined {
 const CACHE = join(homedir(), ".cache", "memory-x", "halumem", "HaluMem-Medium.jsonl");
 const URL = "https://huggingface.co/datasets/IAAR-Shanghai/HaluMem/resolve/main/HaluMem-Medium.jsonl";
 const RECORDS = Number(arg("records") ?? "1");
+const START_RECORD = Number(arg("start-record") ?? "1"); // 从第 N 条记录开始（留出验证：跳过曾用于调参的记录 1）
 const SESSIONS = Number(arg("sessions") ?? "8");
 const QPS = Number(arg("qps") ?? "0"); // 每 session 最多几题；0=不限
 const MODE = (arg("mode") ?? "llm") as "llm" | "mechanical" | "llm-update" | "turn-agent";
@@ -45,12 +47,12 @@ async function datasetPath(): Promise<string> {
 
 const path = await datasetPath();
 const lines = (await readFile(path, "utf8")).split("\n").filter((l) => l.trim());
-const records = lines.slice(0, RECORDS).map((l) => JSON.parse(l) as HaluMemRecord);
+const records = lines.slice(START_RECORD - 1, START_RECORD - 1 + RECORDS).map((l) => JSON.parse(l) as HaluMemRecord);
 
 const llm = MODE === "mechanical" ? null : LlmClient.fromEnv(arg("model"));
 const MODE_LABEL =
   MODE === "turn-agent" ? "Turn 级 agent 仿真" : MODE === "llm-update" ? "LLM 更新感知" : MODE === "llm" ? "LLM 抽取" : "机械建树";
-console.log(`数据集：${path}\n模式：${MODE_LABEL} · 记录 ${records.length} · 每记录前 ${SESSIONS} sessions${llm ? ` · 模型 ${llm.model}` : ""}\n`);
+console.log(`数据集：${path}\n模式：${MODE_LABEL} · 记录 ${START_RECORD}–${START_RECORD + records.length - 1} · 每记录前 ${SESSIONS} sessions${llm ? ` · 模型 ${llm.model}` : ""}\n`);
 
 await mkdir(RUN_DIR, { recursive: true });
 const tagAgg: Record<string, { pass: number; total: number }> = {};
@@ -61,9 +63,9 @@ const summaries: unknown[] = [];
 for (let i = 0; i < records.length; i++) {
   const rec = records[i]!;
   const scenario = toScenario(rec, { maxSessions: SESSIONS, maxQuestionsPerSession: QPS || undefined, turnLevel: MODE === "turn-agent" });
-  const r = await runScenario(scenario, { dir: join(RUN_DIR, `rec-${i + 1}`), llm, mode: MODE });
+  const r = await runScenario(scenario, { dir: join(RUN_DIR, `rec-${START_RECORD + i}`), llm, mode: MODE });
   summaries.push(r);
-  console.log(`▶ 记录 ${i + 1}/${records.length}  ${rec.uuid}  （${Math.min(SESSIONS, rec.sessions.length)}/${rec.sessions.length} sessions · ${scenario.probes?.length ?? 0} 题）`);
+  console.log(`▶ 记录 ${START_RECORD + i}（第 ${i + 1}/${records.length} 条）  ${rec.uuid}  （${Math.min(SESSIONS, rec.sessions.length)}/${rec.sessions.length} sessions · ${scenario.probes?.length ?? 0} 题）`);
   if (r.recall !== undefined) { recalls.push(r.recall); console.log(`  抽取 recall ${r.recall.toFixed(3)}  precision ${r.precision !== undefined ? r.precision.toFixed(3) : "n/a（无更新点）"}`); }
   if (r.precision !== undefined) precisions.push(r.precision);
   if (r.qaTotal) {

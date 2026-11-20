@@ -43,6 +43,19 @@ npm run eval:halumem -- --qps 3                        # 每 session 最多 3 �
 3. UPDATE 新句不要保留旧值字样（previously X），否则词面 precision 判残留；
 4. 剩余短板：career 类隐式更新仍未替换（s4 转型没干掉 s1-3 的 considering…）；recall/precision 存在此消彼长，NOOP 偏严会吃掉真事实。
 
+## 去拟合改写（2026-11-20，原则保留、基准字面量移除）
+
+v3 提示词的规则多从记录 1 的失败案例补丁而来，枚举/例句带着基准原话。改写：
+
+- 枚举改通用判据：「薪资/职衔/健康/雇佣」→「单值属性：判据是**两个取值能否同时成立**」；
+- 例句去基准化：Martin / 15700→18000 / 宠物案句 → 中性人名与多领域例句（编辑器、摄影、徒步）；
+- 「不要写 previously/used to」由机制推导（UPDATE 删除旧叶子、历史在版本记录，复述旧值＝复活已删内容），不再迁就词面判分器；
+- 偏置口径统一：三套写入提示词统一为「同属性新取值 → 必须 UPDATE；拿不准是否同属性 → ADD（错换丢信息、并存可修正）」，消除 UPDATE_SYSTEM「拿不准一律 ADD」与 turn-agent「必须 UPDATE」的方向矛盾；
+- 答题侧：否定证据规则改为方向对称的通用表述；「prefer the most recent」→「current vs former」（写入序≠对话日期，不能假设后写＝现值）。
+
+⚠️ 0.72–0.75 的分数带是在调参所用的记录 1 上量得的。留出验证：
+`npm run eval:halumem -- --start-record 2 --records 1 --mode turn-agent`（记录 2 从未参与调参）。
+
 ## 数据集（不落仓库）
 
 许可 CC-BY-NC-ND-4.0（禁止再分发/演绎），因此从缓存或上游读取：
