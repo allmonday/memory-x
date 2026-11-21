@@ -78,6 +78,25 @@ test("applyOps：无实际改动时 changed=false", () => {
   assert.equal(r.changed, false);
 });
 
+test("applyOps：update_leaf / remove_leaf 的 match 忽略末尾「← 日期」尾巴", () => {
+  const root = seed();
+  root.children[0]!.children[0]!.leaves = ["事实1 ← 2026-11-18", "事实2 ← 2026-11-19"];
+  applyOps(root, [
+    { op: "update_leaf", path: "工作/A", match: "事实1", leaf: "事实1改 ← 2026-11-21" },
+    { op: "remove_leaf", path: "工作/A", match: "事实2 ← 1999-01-01" }, // 带错误日期也能命中
+  ]);
+  assert.deepEqual(root.children[0]!.children[0]!.leaves, ["事实1改 ← 2026-11-21"]);
+});
+
+test("applyOps：归一化后多条命中则拒绝（仅日期不同的两条叶子）", () => {
+  const root = seed();
+  root.children[0]!.children[0]!.leaves = ["事实1 ← 2026-11-18", "事实1 ← 2026-11-19"];
+  assert.throws(
+    () => applyOps(root, [{ op: "remove_leaf", path: "工作/A", match: "事实1" }]),
+    /唯一命中/,
+  );
+});
+
 test("applyOps：失败即抛 OpError（含序号），调用方整批回滚", () => {
   const root = seed();
   const ops: TreeOp[] = [

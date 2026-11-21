@@ -41,3 +41,38 @@ test("updateNode：不动节点 content", async () => {
   assert.equal(mf.readNote("工作/调研"), "# 调研正文\n不参与叶子替换");
   assert.deepEqual(mf.readSection("工作/调研")!.node.leaves, ["阶段=已完成"]);
 });
+
+test("updateNode：match 省略末尾「← 日期」尾巴也能命中（归一化比对）", async () => {
+  const mf = await fresh();
+  const stored = "数据库用 Postgres ← 2026-11-18";
+  await mf.upsertNode("工作/prefs", stored);
+  const r = await mf.updateNode("工作/prefs", "数据库用 Postgres", "数据库用 SQLite ← 2026-11-21");
+  assert.equal(r.ok, true);
+  assert.deepEqual(mf.readSection("工作/prefs")!.node.leaves, ["数据库用 SQLite ← 2026-11-21"]);
+});
+
+test("updateNode：match 带旧/错误日期尾巴同样命中（尾巴不参与比对）", async () => {
+  const mf = await fresh();
+  await mf.upsertNode("工作/prefs", "数据库用 Postgres ← 2026-11-18");
+  const r = await mf.updateNode("工作/prefs", "数据库用 Postgres ← 1999-01-01", "数据库用 SQLite");
+  assert.equal(r.ok, true);
+  assert.deepEqual(mf.readSection("工作/prefs")!.node.leaves, ["数据库用 SQLite"]);
+});
+
+test("updateNode：归一化后多条命中则拒绝（仅日期不同的两条叶子）", async () => {
+  const mf = await fresh();
+  await mf.upsertNode("工作/prefs", "数据库用 Postgres ← 2026-11-18");
+  await mf.upsertNode("工作/prefs", "数据库用 Postgres ← 2026-11-19");
+  const r = await mf.updateNode("工作/prefs", "数据库用 Postgres", "数据库用 SQLite");
+  assert.equal(r.ok, false);
+  assert.equal(r.changed, false);
+  assert.equal(mf.readSection("工作/prefs")!.node.leaves.length, 2);
+});
+
+test("updateNode：日期尾巴只认末尾（正文中间的「← 日期」不归一化）", async () => {
+  const mf = await fresh();
+  await mf.upsertNode("工作/log", "记录 ← 2026-01-01 当天的备注");
+  const r = await mf.updateNode("工作/log", "记录", "改写");
+  assert.equal(r.ok, false);
+  assert.deepEqual(mf.readSection("工作/log")!.node.leaves, ["记录 ← 2026-01-01 当天的备注"]);
+});

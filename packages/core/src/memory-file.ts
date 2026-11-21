@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tocDigest, type TocOptions } from "./digest.ts";
 import { withDirLock } from "./lock.ts";
 import { applyOps as runBatchOps, type TreeOp } from "./ops-batch.ts";
-import { deleteNode, moveNode, upsertNode } from "./ops.ts";
+import { deleteNode, moveNode, stripDateMark, upsertNode } from "./ops.ts";
 import { parseMarkdown } from "./parser.ts";
 import { canonicalPathOf, resolvePath } from "./path.ts";
 import { effectiveSummary, summaryHash } from "./summary.ts";
@@ -208,16 +208,18 @@ export class MemoryFile {
   }
 
   /**
-   * 原地替换节点内某条叶子（supersede）：`match` 必须在该节点内**精确且唯一**命中，
-   * 否则不做任何改动（ok=false）——防误替换。旧值被替换后即从检索中消失；变更落 revisions 可回滚。
+   * 原地替换节点内某条叶子（supersede）：比对前先剥掉两侧末尾的「← 日期」标记（归一化），
+   * match 不带日期尾巴也能命中；归一化后须**唯一**命中，否则不做任何改动（ok=false）——防误替换。
+   * 旧值被替换后即从检索中消失；变更落 revisions 可回滚。
    */
   async updateNode(path: string, match: string, leaf: string): Promise<OpResult> {
     return this.mutate("update", path, (root) => {
       const r = resolvePath(root, path, { fuzzy: true });
       if (!r) return { ok: false, changed: false, path };
-      const hits = r.node.leaves.filter((l) => l === match).length;
+      const m = stripDateMark(match);
+      const hits = r.node.leaves.filter((l) => stripDateMark(l) === m).length;
       if (hits !== 1) return { ok: false, changed: false, path };
-      r.node.leaves = r.node.leaves.map((l) => (l === match ? leaf : l));
+      r.node.leaves = r.node.leaves.map((l) => (stripDateMark(l) === m ? leaf : l));
       return { changed: true, path };
     });
   }

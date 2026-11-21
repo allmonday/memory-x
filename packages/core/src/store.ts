@@ -92,9 +92,6 @@ CREATE TABLE IF NOT EXISTS changes(
 ) WITHOUT ROWID;
 `;
 
-/** 版本时间线保留上限（超过后裁剪最旧版本，undo 行随外键级联删除） */
-export const MAX_REVISIONS = 500;
-
 interface NodeRow {
   id: number;
   uid: string;
@@ -786,17 +783,13 @@ export class MemoryStore {
   // 真相 = 当前 nodes/leaves。revisions 只存时间线元数据（一行一次 mutation，无树内容）；
   // changes = 逐节点 undo log（键 uid，存变更【前】状态）。
   // 任意版本由「当前态 + 撤销 revision_id > target 的 before 行」物化（降序逆向回溯）。
-  // 不变式：回滚是前进（新版本），历史永不改写。
+  // 不变式：回滚是前进（新版本），历史永不改写、永不裁剪。
 
   /** 记录一次变更的时间线元数据，返回版本号。 */
   recordRevision(op: string, path: string | null, detail: string | null = null, actor = "pi"): number {
     const info = this.db
       .prepare("INSERT INTO revisions(op, path, actor, detail) VALUES (?, ?, ?, ?)")
       .run(op, path, actor, detail);
-    // 裁剪最旧历史（changes 随 FK 级联删除）
-    this.db.exec(
-      `DELETE FROM revisions WHERE id <= (SELECT MAX(id) - ${MAX_REVISIONS} FROM revisions)`,
-    );
     return Number(info.lastInsertRowid);
   }
 

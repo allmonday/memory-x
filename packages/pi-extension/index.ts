@@ -22,7 +22,6 @@ import {
   dumpTree,
   enumerateNodePaths,
   lintTree,
-  MAX_REVISIONS,
   serializeMarkdown,
   serializeOutline,
   serializeSubtree,
@@ -311,7 +310,7 @@ export default function memoryExtension(pi: any): void {
         const tops = m.root.children.map((c) => c.title).join("、") || "（空）";
         return text(`路径不存在且无历史记录：${params.path}\n当前顶层节点：${tops}`);
       }
-      if (rows.length === 0) return text(`「${params.path}」无历史（从未改写；历史窗口为最近 ${MAX_REVISIONS} 版本）`);
+      if (rows.length === 0) return text(`「${params.path}」无历史（从未改写；历史永久保留）`);
       const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       const fmt = (s: string): string =>
         s.length > VALUE_MAX_CHARS ? `${esc(s.slice(0, VALUE_MAX_CHARS))}…（共 ${s.length} 字，已截断）` : esc(s);
@@ -353,7 +352,7 @@ export default function memoryExtension(pi: any): void {
       const m = await memory();
       const limit = Math.min(Math.max(Math.trunc(params.limit ?? 10), 1), 30);
       const rows = m.listChanges({ limit });
-      if (rows.length === 0) return text("暂无变更记录（新库，或历史窗口已被裁剪）。", { count: 0 });
+      if (rows.length === 0) return text("暂无变更记录（新库）。", { count: 0 });
       const body = formatChangesForModel(rows);
       return text(
         `最近变更（新→旧，按版本分组，limit=${limit} 行）：\n${body}\n\n（回滚某版本可告知用户执行：/memory rollback <id>）`,
@@ -401,10 +400,10 @@ export default function memoryExtension(pi: any): void {
     name: "memory_update",
     label: "更新记忆",
     description:
-      "原地替换某节点内的一条叶子事实（supersede/更新）。match = 要被替换的旧叶子原文，必须在该节点内**精确且唯一**命中，否则不做任何改动。用于「阶段性变化」：状态/计划/偏好变了、或旧结论被推翻。旧值被替换后即从检索中消失（变更落 revisions 可回滚）。",
+      "原地替换某节点内的一条叶子事实（supersede/更新）。match = 要被替换的旧叶子原文，必须在该节点内**唯一**命中，否则不做任何改动；比对时自动忽略末尾的「← 日期」尾巴（match 带不带日期均可）。用于「阶段性变化」：状态/计划/偏好变了、或旧结论被推翻。旧值被替换后即从检索中消失（变更落 revisions 可回滚）。",
     promptSnippet: "替换一条过时的记忆",
     promptGuidelines: [
-      "Use memory_update when new information SUPERSEDES an existing leaf (state changed / plan updated / fact corrected) instead of adding a duplicate. `match` must be the exact old leaf text; read the node first (memory_read) to copy it verbatim. If it is not unique in the node, nothing changes.",
+      "Use memory_update when new information SUPERSEDES an existing leaf (state changed / plan updated / fact corrected) instead of adding a duplicate. `match` must uniquely identify the old leaf; read the node first (memory_read) to copy it. A trailing auto-appended date mark (`← YYYY-MM-DD`) is ignored on both sides, so you may omit it. If not unique in the node, nothing changes.",
     ],
     parameters: {
       type: "object",
@@ -420,7 +419,7 @@ export default function memoryExtension(pi: any): void {
       const r = await m.updateNode(params.path, params.match, withDate(params.leaf));
       if (!r.ok) {
         return text(
-          `未替换：在「${params.path}」内未唯一命中旧原文（或路径不存在）。先用 memory_read 查看该节点、逐字复制要替换的叶子。`,
+          `未替换：在「${params.path}」内未唯一命中旧原文（或路径不存在）。先用 memory_read 查看该节点、复制要替换的叶子原文（末尾「← 日期」尾巴可省略）。`,
         );
       }
       if (r.changed) invalidateToc();
@@ -638,7 +637,7 @@ export default function memoryExtension(pi: any): void {
         ops: {
           type: "array",
           description:
-            "结构化操作列表（按序应用）。op 与必填字段：add_leaf{path,leaf} / update_leaf{path,match,leaf} / remove_leaf{path,match} / rename{path,title} / move{from,to} / add_node{parent,title} / delete{path} / set_note{path,content} / set_summary{path,summary}。match 须为节点内**精确且唯一**的叶子原文。路径为物化规范路径。",
+            "结构化操作列表（按序应用）。op 与必填字段：add_leaf{path,leaf} / update_leaf{path,match,leaf} / remove_leaf{path,match} / rename{path,title} / move{from,to} / add_node{parent,title} / delete{path} / set_note{path,content} / set_summary{path,summary}。match 须为节点内唯一命中的叶子原文（末尾「← 日期」尾巴可省略）。路径为物化规范路径。",
           items: {
             type: "object",
             properties: {
@@ -808,7 +807,7 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；查节点历史值（旧值/演变）用 memory_history(path)；看最近全局变更（自审 tidy 落盘/新会话了解树动态）用 memory_changes(limit)；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；查节点历史值（旧值/演变）用 memory_history(path)；看最近全局变更（自审 tidy 落盘/新会话了解树动态）用 memory_changes(limit)；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须唯一命中；末尾「← 日期」尾巴可省略），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
       `写入规范：${WRITE_STYLE}`,
     ].join("\n");
 
@@ -1162,7 +1161,7 @@ function enumerateNodes(root: any): NodeEntry[] {
 const OPS_GUIDE = [
   "输出方式：调用 memory_propose，参数 ops 是按序应用的操作数组。可用操作：",
   "  add_leaf{path,leaf} · update_leaf{path,match,leaf} · remove_leaf{path,match} · rename{path,title} · move{from,to} · add_node{parent,title} · delete{path} · set_note{path,content} · set_summary{path,summary}",
-  "规则：path/from/to/parent 用物化规范路径（重名兄弟带 [n]）；match 必须是节点内**精确且唯一**的叶子原文；rename 同层不得重名；一条一事；时间戳保留。",
+  "规则：path/from/to/parent 用物化规范路径（重名兄弟带 [n]）；match 必须是节点内唯一命中的叶子原文（末尾「← 日期」尾巴可省略）；rename 同层不得重名；一条一事；时间戳保留。",
   "只做必要的改动——未在 ops 中提及的节点会原样保留，不会被重写。",
   "【禁止调用其它写工具（upsert/update/move/delete/…）——它们在整理模式下被拦截】。",
   "完成后调用 memory_propose 提交 ops（会**直接落盘**为一个版本，可 /memory rollback 回滚）+ 一句话整理说明；随后在回复里给出本版本变更摘要与回滚命令。",

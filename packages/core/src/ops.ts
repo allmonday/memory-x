@@ -10,6 +10,14 @@ export interface UpsertResult {
 }
 
 /**
+ * 剥掉叶子末尾自动附加的「← YYYY-MM-DD」时间锚点。
+ * 仅用于 match 比对归一化（update/remove 不因日期尾巴而失配）；写入侧 withDate 不变。
+ */
+export function stripDateMark(s: string): string {
+  return s.replace(/\s*←\s*\d{4}-\d{2}-\d{2}\s*$/, "");
+}
+
+/**
  * 新增/更新一条叶子事实。路径中的缺失节点按序创建（含消歧复用既有同名节点）。
  * 精确重复（leaf 全等）为幂等 no-op。
  */

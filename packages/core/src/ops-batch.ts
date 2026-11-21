@@ -1,4 +1,5 @@
 import { resolvePath } from "./path.ts";
+import { stripDateMark } from "./ops.ts";
 import { summaryHash } from "./summary.ts";
 import type { MemoryNode } from "./types.ts";
 
@@ -94,17 +95,19 @@ function applyOne(root: MemoryNode, op: TreeOp, i: number): boolean {
     }
     case "update_leaf": {
       const r = mustResolve(root, op.path, op.op, i);
-      const hits = r.node.leaves.filter((l) => l === op.match).length;
-      if (hits !== 1) throw new OpError(i, op.op, `match 须精确且唯一命中（当前 ${hits} 次）：${op.match}`);
+      const m = stripDateMark(op.match);
+      const hits = r.node.leaves.filter((l) => stripDateMark(l) === m).length;
+      if (hits !== 1) throw new OpError(i, op.op, `match 须唯一命中（日期尾巴已归一化；当前 ${hits} 次）：${op.match}`);
       if (typeof op.leaf !== "string" || op.leaf.trim() === "") throw new OpError(i, op.op, "leaf 为空");
-      r.node.leaves = r.node.leaves.map((l) => (l === op.match ? op.leaf : l));
+      r.node.leaves = r.node.leaves.map((l) => (stripDateMark(l) === m ? op.leaf : l));
       return true;
     }
     case "remove_leaf": {
       const r = mustResolve(root, op.path, op.op, i);
-      const hits = r.node.leaves.filter((l) => l === op.match).length;
-      if (hits !== 1) throw new OpError(i, op.op, `match 须精确且唯一命中（当前 ${hits} 次）：${op.match}`);
-      r.node.leaves = r.node.leaves.filter((l) => l !== op.match);
+      const m = stripDateMark(op.match);
+      const hits = r.node.leaves.filter((l) => stripDateMark(l) === m).length;
+      if (hits !== 1) throw new OpError(i, op.op, `match 须唯一命中（日期尾巴已归一化；当前 ${hits} 次）：${op.match}`);
+      r.node.leaves = r.node.leaves.filter((l) => stripDateMark(l) !== m);
       return true;
     }
     case "rename": {

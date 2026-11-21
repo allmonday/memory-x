@@ -25,7 +25,7 @@
 |---|---|---|
 | P1 | **SQLite 是唯一真相（nodes + revisions + changes）**（D6→D7 演进） | 无镜像无 git；版本时间线与 undo log 在库内；索引/缓存全部可删重建 |
 | P2 | **渐进披露** | 常驻注入只有小目录摘要，细节靠工具按需取 |
-| P3 | **版本历史在库内**（revisions 时间线 + changes 逐节点 undo log，MAX 500，无整树快照） | 移植 MindMap X MVCC 语义：任意版本由当前态逆推 undo 物化；回滚是前进（新版本），历史不改写，可前滚 |
+| P3 | **版本历史在库内**（revisions 时间线 + changes 逐节点 undo log，不裁剪，无整树快照） | 移植 MindMap X MVCC 语义：任意版本由当前态逆推 undo 物化；回滚是前进（新版本），历史不改写，可前滚；元数据体积小，永久保留 |
 | P4 | **抽取宁缺毋滥** | 垃圾条目烂树；precision 优先于 recall |
 | P5 | **单人系统单人信号** | 访问频率、最近使用是免费排序信号，用起来 |
 
@@ -56,7 +56,7 @@ flowchart TB
     subgraph STORE["存储 · B 案单文件真相源（D6→D7）"]
         direction LR
         DB[".memory/memory.db<br/>nodes（uid + 物化 path） / leaves<br/>content 正文"]
-        REV["revisions 时间线 + changes 逐节点 undo log · MAX 500<br/>物化任意版本 = 逆推 undo<br/>回滚 = 落新版本（历史不改写 · 可前滚）"]
+        REV["revisions 时间线 + changes 逐节点 undo log · 不裁剪（历史永久）<br/>物化任意版本 = 逆推 undo<br/>回滚 = 落新版本（历史不改写 · 可前滚）"]
         IDX["派生索引<br/>FTS5 trigram ∪ LIKE →（后期）向量 → RRF 融合<br/>可随时删库重建"]
     end
 
