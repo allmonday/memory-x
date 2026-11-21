@@ -113,6 +113,11 @@ export class MemoryFile {
     return r ? serializeSubtree(r.node) : null;
   }
 
+  /** 各节点改写次数（uid → 次数；不含创建）。供 read 标注「有历史」。 */
+  historyCounts(): Map<string, number> {
+    return this.store.rewriteCounts();
+  }
+
   tocDigest(opts?: TocOptions): string {
     this.reloadIfStale();
     return tocDigest(this.root, opts);

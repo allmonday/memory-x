@@ -797,6 +797,50 @@ export class MemoryStore {
     return row.id;
   }
 
+  /**
+   * 每节点的改写次数（uid → 次数）。
+   * 口径：节点「语义态」（title/leaves/content/summary）在版本链上被改变的次数。
+   * 创建（before=null）不计；纯位置变化（ord/parentUid，含兄弟移动引起的重排）不计。
+   * 供 memory_read 标注「该节点有历史」，让模型知道值可能被取代过。
+   */
+  rewriteCounts(): Map<string, number> {
+    const rows = this.db
+      .prepare("SELECT uid, before FROM changes WHERE before IS NOT NULL ORDER BY uid, revision_id")
+      .all() as Array<{ uid: string; before: string }>;
+    if (rows.length === 0) return new Map();
+    const semanticEq = (a: NodeState, b: NodeState): boolean =>
+      a.title === b.title &&
+      (a.content ?? null) === (b.content ?? null) &&
+      (a.summary ?? null) === (b.summary ?? null) &&
+      arrEq(a.leaves, b.leaves);
+    const cur = this.currentByUid();
+    const out = new Map<string, number>();
+    // 同 uid 的 before 序列（升序）：第 i 行的 after 态 = 第 i+1 行的 before 或当前态
+    let uid = "";
+    let states: NodeState[] = [];
+    const flush = (): void => {
+      if (states.length === 0) return;
+      let after: NodeState | null = cur.get(uid)?.state ?? null;
+      let n = 0;
+      for (let i = states.length - 1; i >= 0; i--) {
+        const b = states[i]!;
+        if (after == null || !semanticEq(b, after)) n++;
+        after = b;
+      }
+      if (n > 0) out.set(uid, n);
+      states = [];
+    };
+    for (const r of rows) {
+      if (r.uid !== uid) {
+        flush();
+        uid = r.uid;
+      }
+      states.push(JSON.parse(r.before) as NodeState);
+    }
+    flush();
+    return out;
+  }
+
   listRevisions(
     limit = 20,
   ): Array<{ id: number; op: string; path: string | null; actor: string; detail: string | null; createdAt: string }> {

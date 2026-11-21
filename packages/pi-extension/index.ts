@@ -24,6 +24,7 @@ import {
   lintTree,
   serializeMarkdown,
   serializeOutline,
+  serializeSubtree,
   tocDigest,
   type TreeOp,
 } from "../core/src/index.ts";
@@ -190,8 +191,11 @@ async function spawnUiInTerminal(argv: string[], cwd: string): Promise<boolean> 
   return false;
 }
 
-function text(t: string): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } {
-  return { content: [{ type: "text", text: t }], details: {} };
+function text(
+  t: string,
+  details: Record<string, unknown> = {},
+): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } {
+  return { content: [{ type: "text", text: t }], details };
 }
 
 const pathParam = {
@@ -217,18 +221,25 @@ export default function memoryExtension(pi: any): void {
     },
     async execute(_toolCallId: string, params: { path: string }) {
       const m = await memory();
-      const md = m.renderSection(params.path);
-      if (md !== null) m.recordAccess(params.path); // 访问信号（P5）
-      if (md === null) {
+      const r = m.readSection(params.path);
+      if (r === null) {
         const tops = m.root.children.map((c) => c.title).join("、") || "（空）";
         return text(`路径不存在：${params.path}\n当前顶层节点：${tops}`);
       }
+      m.recordAccess(params.path); // 访问信号（P5）
+      const md = serializeSubtree(r.node);
+      // 改写计数：不含创建，只数旧值被取代过的次数（0 = 从未被改写，不标注）
+      const hist = m.historyCounts().get(r.node.uid ?? "") ?? 0;
       const summary = m.getSummary(params.path);
-      const head = summary ? `> 摘要：${summary}\n\n` : "";
+      const head =
+        (summary ? `> 摘要：${summary}\n` : "") +
+        (hist > 0 ? `> 历史：${hist} 次改写（旧值可 /memory changes 回溯）\n` : "") +
+        "\n";
+      const details = { historyCount: hist };
       if (md.length > READ_MAX_CHARS) {
-        return text(`${head}${md.slice(0, READ_MAX_CHARS)}\n…（已截断，请用更深的路径分段读取）`);
+        return text(`${head}${md.slice(0, READ_MAX_CHARS)}\n…（已截断，请用更深的路径分段读取）`, details);
       }
-      return text(head + md);
+      return text(head + md, details);
     },
   });
 

@@ -90,3 +90,36 @@ test("写入后不再产生 MEMORY.md / .git（镜像已移除）", async () => 
   const n = (db.prepare("SELECT COUNT(*) AS n FROM nodes").get() as { n: number }).n;
   assert.equal(n, 2, "根+域");
 });
+
+test("rewriteCounts：创建/移动不计，语义改写计，未动节点为 0", async () => {
+  const dir = await tmpDir();
+  const mf = await MemoryFile.open(dir);
+  await mf.upsertNode("域/A", "事实一");
+  await mf.upsertNode("域/B", "事实X");
+  const uidA = mf.readSection("域/A")!.node.uid!;
+  const uidB = mf.readSection("域/B")!.node.uid!;
+  assert.equal(mf.historyCounts().get(uidA) ?? 0, 0, "创建不计改写");
+  assert.equal(mf.historyCounts().get(uidB) ?? 0, 0, "创建不计改写");
+
+  // 同节点幂等 upsert 不产生 undo 行 → 计数不变
+  await mf.upsertNode("域/A", "事实一");
+  assert.equal(mf.historyCounts().get(uidA) ?? 0, 0, "幂等写入不计");
+
+  // 叶子替换（真正改写）→ 计 1
+  await mf.updateNode("域/A", "事实一", "事实一改");
+  assert.equal(mf.historyCounts().get(uidA) ?? 0, 1, "改写计 1");
+
+  // 纯移动（uid 不变、语义态不变）→ 不计；兄弟 ord 重排也不计入 B
+  await mf.upsertNode("域二/D", "占位");
+  await mf.moveNode("域/A", "域二");
+  assert.equal(mf.readSection("域二/A")!.node.uid, uidA, "移动后 uid 稳定");
+  assert.equal(mf.historyCounts().get(uidA) ?? 0, 1, "纯位置变化不计改写");
+  assert.equal(mf.historyCounts().get(uidB) ?? 0, 0, "兄弟重排不计改写");
+
+  // 追加叶子是语义改写；回滚（restore 到早期版本）是一次前进写入，也计改写
+  const revY = Number((await mf.upsertNode("域/B", "事实Y")).revision);
+  assert.equal(mf.historyCounts().get(uidB) ?? 0, 1, "追加叶子计改写");
+  await mf.upsertNode("域/B", "事实Z");
+  await mf.restoreRevision(revY);
+  assert.equal(mf.historyCounts().get(uidB) ?? 0, 3, "回滚撤销也计改写");
+});
