@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   MemoryFile,
   TREE_OP_NAMES,
+  canonicalPathOf,
   diffToChangeRows,
   dumpTree,
   enumerateNodePaths,
@@ -36,6 +37,60 @@ const READ_MAX_CHARS = 6000;
 const VALUE_MAX_CHARS = 500;
 /** 自动召回注入阈值：综合分低于此不注入（减噪；MEMORY_X_INJECT_MIN 可调） */
 const AUTO_INJECT_MIN_SCORE = Number(process.env.MEMORY_X_INJECT_MIN ?? "1.0");
+
+// ---------- 上下文锚定（P0/P1）：MEMORY_X_ANCHOR=off|hint|strict ----------
+
+/** 锚定模式：off=无 prompt 无守卫；hint=守卫提示非阻断（默认）；strict=写入门禁阻断 */
+const ANCHOR_MODE = ((): "off" | "hint" | "strict" => {
+  const v = process.env.MEMORY_X_ANCHOR;
+  return v === "off" || v === "hint" || v === "strict" ? v : "hint";
+})();
+
+/** 本会话 memory_read 过的规范路径（写入门禁的「已读」凭证） */
+const readPaths = new Set<string>();
+
+/** P0 锚定协议（稳定段两句，英文防膨胀；off 时不注入） */
+const ANCHOR_RULES =
+  "Anchor before acting: resolve the task to a memory node path first (unique hit → read then act; ambiguous → search/disambiguate; miss → proceed, materialize node only on first durable write). Never write to a node you haven't read this session; before adding, check whether an existing leaf already holds this fact — supersede, don't parallel-add.";
+
+/**
+ * 写前守卫（上下文锚定 P1）：
+ * - 写入门禁：目标节点已存在但本会话未 memory_read → 提示先读（strict 转阻断，返回 block=true）
+ * - 查重探针：按待写内容检索，高分命中落在目标子树之外 → 提示疑似同主题、应 update 原地替换
+ *   （打软更新并列失替 + 重复主题节点；阈值与自动召回同源 AUTO_INJECT_MIN_SCORE，仅提示一条防刷屏）
+ */
+export function anchorGuards(
+  m: MemoryFile,
+  path: string,
+  reads: Set<string>,
+  opts: { strict?: boolean; probeQuery?: string; minScore?: number } = {},
+): { block: boolean; hints: string[] } {
+  const hints: string[] = [];
+  let block = false;
+  let canon: string | null = null;
+  const r = m.readSection(path);
+  if (r?.node) canon = canonicalPathOf(m.root, r.node);
+  if (canon && !reads.has(canon)) {
+    const msg = `写入已存在节点但本会话未 memory_read：${canon}（锚定协议：先读再写）`;
+    if (opts.strict) {
+      block = true;
+      hints.push(`⛔ ${msg}——strict 模式已阻断本次写入，请先 memory_read 该子树再写`);
+    } else hints.push(msg);
+  }
+  const q = opts.probeQuery?.trim();
+  if (q && q.length >= 3) {
+    const min = opts.minScore ?? AUTO_INJECT_MIN_SCORE;
+    for (const h of m.search(q, 3)) {
+      if (h.score < min) continue;
+      if (canon && (h.path === canon || h.path.startsWith(`${canon}/`))) continue;
+      hints.push(
+        `疑似与「${h.path}」已有内容同主题（${h.snippet.slice(0, 40)}…）——状态变化应 memory_update 原地替换，勿并列新增；确为新事实可忽略`,
+      );
+      break;
+    }
+  }
+  return { block, hints };
+}
 
 /**
  * 记忆写入规范（借 ASD-STE 原则）：短句、一句一事、主动语态、术语一致、去修饰；
@@ -273,6 +328,10 @@ export default function memoryExtension(pi: any): void {
         return text(`路径不存在：${params.path}\n当前顶层节点：${tops}`);
       }
       m.recordAccess(params.path); // 访问信号（P5）
+      if (ANCHOR_MODE !== "off") {
+        const canon = canonicalPathOf(m.root, r.node);
+        if (canon) readPaths.add(canon); // 锚定凭证：本会话读过（写入门禁 P1）
+      }
       const md = serializeSubtree(r.node);
       // 改写计数：不含创建，只数旧值被取代过的次数（0 = 从未被改写，不标注）
       const hist = m.historyCounts().get(r.node.uid ?? "") ?? 0;
@@ -380,10 +439,17 @@ export default function memoryExtension(pi: any): void {
     },
     async execute(_toolCallId: string, params: { path: string; leaf: string }) {
       const m = await memory();
+      // 锚定守卫（P1）：写入门禁 + 查重探针；strict 模式门禁转阻断（写入前拦截）
+      let anchor: string[] = [];
+      if (ANCHOR_MODE !== "off") {
+        const g = anchorGuards(m, params.path, readPaths, { strict: ANCHOR_MODE === "strict", probeQuery: params.leaf });
+        if (g.block) return text(g.hints.join("\n"));
+        anchor = g.hints;
+      }
       const r = await m.upsertNode(params.path, withDate(params.leaf));
       if (r.changed) invalidateToc();
       // 结构守卫（非阻断，只给模型提示）
-      const hints: string[] = [];
+      const hints: string[] = [...anchor];
       const depth = r.path.split("/").length;
       if (depth > 4) hints.push(`路径已达 ${depth} 层——深埋的内容通常是新主题信号，考虑提升为兄弟`);
       const sec = m.readSection(r.path);
@@ -416,6 +482,10 @@ export default function memoryExtension(pi: any): void {
     },
     async execute(_toolCallId: string, params: { path: string; match: string; leaf: string }) {
       const m = await memory();
+      if (ANCHOR_MODE !== "off") {
+        const g = anchorGuards(m, params.path, readPaths, { strict: ANCHOR_MODE === "strict" });
+        if (g.block) return text(g.hints.join("\n"));
+      }
       const r = await m.updateNode(params.path, params.match, withDate(params.leaf));
       if (!r.ok) {
         return text(
@@ -807,7 +877,8 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；查节点历史值（旧值/演变）用 memory_history(path)；看最近全局变更（自审 tidy 落盘/新会话了解树动态）用 memory_changes(limit)；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须唯一命中；末尾「← 日期」尾巴可省略），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；查节点历史值（旧值/演变）用 memory_history(path)；看最近全局变更（自审 tidy 落盘/新会话了解树动态）用 memory_changes(limit)；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须唯一命中；末尾「← 日期」尾巴可省略），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。" +
+        (ANCHOR_MODE !== "off" ? " " + ANCHOR_RULES : ""),
       `写入规范：${WRITE_STYLE}`,
     ].join("\n");
 
