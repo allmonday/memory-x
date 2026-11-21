@@ -8,7 +8,7 @@ import { parseMarkdown } from "./parser.ts";
 import { canonicalPathOf, resolvePath } from "./path.ts";
 import { effectiveSummary, summaryHash } from "./summary.ts";
 import { serializeSubtree } from "./serializer.ts";
-import { MemoryStore, ensureUids, leafHash, type Episode, type EvidenceRef, type ChangeRow } from "./store.ts";
+import { MemoryStore, ensureUids, leafHash, type Episode, type EvidenceRef, type ChangeRow, type HistoryRow } from "./store.ts";
 import { diffTrees, type TreeDiff } from "./tree-diff.ts";
 import type { MemoryNode, OpResult, Resolved } from "./types.ts";
 
@@ -321,6 +321,20 @@ export class MemoryFile {
 
   listChanges(opts: { revisionId?: number; limit?: number } = {}): ChangeRow[] {
     return this.store.listChanges(opts);
+  }
+
+  /**
+   * 某节点的历史值（新→旧，只记每次写入的值）：
+   * 活节点按 fuzzy 解析取 uid；已删除节点兑底按 changes 里记录过的路径精确匹配。
+   * 返回 uid 是否命中与节点是否已删除，便于上层给提示。
+   */
+  nodeHistory(path: string): { rows: HistoryRow[]; found: boolean; deleted: boolean } {
+    this.reloadIfStale();
+    const r = resolvePath(this.root, path, { fuzzy: true });
+    if (r?.node.uid) return { rows: this.store.listNodeHistory(r.node.uid), found: true, deleted: false };
+    const uid = this.store.uidByRecordedPath(path);
+    if (uid == null) return { rows: [], found: false, deleted: false };
+    return { rows: this.store.listNodeHistory(uid), found: true, deleted: true };
   }
 
   /** 相对某个历史版本的结构差异（当前树 vs 该版本物化态）。 */

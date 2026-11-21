@@ -22,6 +22,7 @@ import {
   dumpTree,
   enumerateNodePaths,
   lintTree,
+  MAX_REVISIONS,
   serializeMarkdown,
   serializeOutline,
   serializeSubtree,
@@ -32,6 +33,8 @@ import {
 const MEMORY_DIR = process.env.MEMORY_X_DIR || join(homedir(), "memory-x", "memory");
 const SECTION_MAX_CHARS = 1600;
 const READ_MAX_CHARS = 6000;
+/** memory_history 单条历史值（叶子/标题/正文）的展示上限；超长截断标注总字数 */
+const VALUE_MAX_CHARS = 500;
 /** 自动召回注入阈值：综合分低于此不注入（减噪；MEMORY_X_INJECT_MIN 可调） */
 const AUTO_INJECT_MIN_SCORE = Number(process.env.MEMORY_X_INJECT_MIN ?? "1.0");
 
@@ -233,13 +236,56 @@ export default function memoryExtension(pi: any): void {
       const summary = m.getSummary(params.path);
       const head =
         (summary ? `> 摘要：${summary}\n` : "") +
-        (hist > 0 ? `> 历史：${hist} 次改写（旧值可 /memory changes 回溯）\n` : "") +
+        (hist > 0 ? `> 历史：${hist} 次改写（旧值可用 memory_history 查询）\n` : "") +
         "\n";
       const details = { historyCount: hist };
       if (md.length > READ_MAX_CHARS) {
         return text(`${head}${md.slice(0, READ_MAX_CHARS)}\n…（已截断，请用更深的路径分段读取）`, details);
       }
       return text(head + md, details);
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_history",
+    label: "查节点历史",
+    description:
+      "查某节点的历史值（新→旧）：每次写入的叶子/标题/正文按版本列出，每个值只出现一次（在被写入的那个版本）。用于回答「这个节点以前是什么」「某条记忆被改过几次、改成什么样了」。已删除节点也可查（按历史路径兑底）。",
+    promptSnippet: "查节点历史值",
+    promptGuidelines: [
+      "Use memory_history when you need past values of a node (what it said before being superseded, how it evolved, or its value before deletion). Output is newest-first; each historical value appears once, at the revision that wrote it.",
+    ],
+    parameters: {
+      type: "object",
+      properties: { path: pathParam },
+      required: ["path"],
+    },
+    async execute(_toolCallId: string, params: { path: string }) {
+      const m = await memory();
+      const { rows, found, deleted } = m.nodeHistory(params.path);
+      if (!found) {
+        const tops = m.root.children.map((c) => c.title).join("、") || "（空）";
+        return text(`路径不存在且无历史记录：${params.path}\n当前顶层节点：${tops}`);
+      }
+      if (rows.length === 0) return text(`「${params.path}」无历史（从未改写；历史窗口为最近 ${MAX_REVISIONS} 版本）`);
+      const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const fmt = (s: string): string =>
+        s.length > VALUE_MAX_CHARS ? `${esc(s.slice(0, VALUE_MAX_CHARS))}…（共 ${s.length} 字，已截断）` : esc(s);
+      const values = rows.filter((r) => r.value != null).length;
+      const lines = rows.map((r) => {
+        const attrs = `rev="#${r.revisionId}" at="${r.createdAt}" op="${r.op}"${r.revDetail ? ` note="${esc(r.revDetail.slice(0, 80))}"` : ""}`;
+        return r.value == null ? `<value ${attrs}/>` : `<value ${attrs}>\n${fmt(r.value)}\n</value>`;
+      });
+      const head = `<history path="${params.path}"${deleted ? ' deleted="yes"' : ""} values="${values}">`;
+      let body = `${head}\n${lines.join("\n")}\n</history>`;
+      if (body.length > READ_MAX_CHARS) {
+        const shown = rows.length;
+        body = body.slice(0, READ_MAX_CHARS);
+        const cut = body.lastIndexOf("<value ");
+        if (cut > 0) body = body.slice(0, cut);
+        body += `\n…（已截断，仅显示最近若干条；共 ${shown} 条，可用更具体的时间/叶子描述缩小范围）\n</history>`;
+      }
+      return text(body, { historyCount: rows.length });
     },
   });
 
@@ -689,7 +735,7 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；查节点历史值（旧值/演变）用 memory_history(path)；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
       `写入规范：${WRITE_STYLE}`,
     ].join("\n");
 

@@ -253,6 +253,19 @@ export interface ChangeRow {
   createdAt: string;
 }
 
+/** 节点历史条目：某版本为该节点【写入】的值（只记写入侧；被取代的旧值在其出生版本已列出，不重复）。 */
+export interface HistoryRow {
+  revisionId: number;
+  /** 版本级操作名（upsert/update/tidy…）与说明，便于归组 */
+  revOp: string;
+  revDetail: string | null;
+  createdAt: string;
+  /** add=add-node 建节点；add/remove=叶子增删；rename/note/summary/move/delete=节点级 */
+  op: string;
+  /** 写入的值（叶子文本 / 新标题 / 新摘要 / 新正文）；remove/move/delete 无写入值为 null */
+  value: string | null;
+}
+
 export interface SearchHit {
   path: string;
   title: string;
@@ -839,6 +852,85 @@ export class MemoryStore {
     }
     flush();
     return out;
+  }
+
+  /** 已删除节点的兑底寻址：按 changes 里记录过的物化路径精确匹配最后一次出现的 uid。 */
+  uidByRecordedPath(path: string): string | null {
+    const row = this.db
+      .prepare("SELECT uid FROM changes WHERE path = ? ORDER BY revision_id DESC LIMIT 1")
+      .get(path) as { uid: string } | undefined;
+    return row?.uid ?? null;
+  }
+
+  /**
+   * 某节点的历史值（新→旧）：每次写入的值各列一条，不做 from/to 对偶——
+   * 同 uid 的 before 链（升序）即「上一版末态」，末行 after 补当前态；
+   * 相邻快照 diff 只取写入侧（新增叶子/新标题/新正文），被移除的旧值不重列。
+   * deleted 行（before 里的末态）只发 delete 标记；回滚复活按 before=null 重新走建节点分支。
+   */
+  listNodeHistory(uid: string): HistoryRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT c.revision_id AS rev, c.path AS path, c.deleted AS deleted, c.before AS before,
+                r.op AS rev_op, r.detail AS rev_detail, r.created_at AS created_at
+         FROM changes c JOIN revisions r ON r.id = c.revision_id
+         WHERE c.uid = ? ORDER BY c.revision_id ASC`,
+      )
+      .all(uid) as Array<{
+      rev: number;
+      path: string;
+      deleted: number;
+      before: string | null;
+      rev_op: string;
+      rev_detail: string | null;
+      created_at: string;
+    }>;
+    if (rows.length === 0) return [];
+    const current = this.currentByUid().get(uid)?.state ?? null;
+    const out: HistoryRow[] = [];
+    const emit = (r: (typeof rows)[number], op: string, value: string | null): void => {
+      out.push({
+        revisionId: r.rev,
+        revOp: r.rev_op,
+        revDetail: r.rev_detail,
+        createdAt: r.created_at,
+        op,
+        value,
+      });
+    };
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i]!;
+      const b: NodeState | null = r.before == null ? null : (JSON.parse(r.before) as NodeState);
+      // 本版末态 = 下一行的 before（下一行 before=null 说明节点在本版之后不存在）；末行补当前态
+      const nextRow = rows[i + 1];
+      const a: NodeState | null = nextRow
+        ? nextRow.before == null
+          ? null
+          : (JSON.parse(nextRow.before) as NodeState)
+        : current;
+      if (b == null) {
+        // 建节点（含回滚复活）：写入侧 = 初始标题 + 全部叶子 + 正文/摘要
+        if (a == null) continue; // 防御：不应发生（无中生有的删除行）
+        emit(r, "add-node", a.title);
+        for (const leaf of a.leaves) emit(r, "add", leaf);
+        if (a.content != null) emit(r, "note", a.content);
+        if (a.summary != null) emit(r, "summary", a.summary);
+        continue;
+      }
+      if (a == null) {
+        emit(r, "delete", null);
+        continue;
+      }
+      if (a.title !== b.title) emit(r, "rename", a.title);
+      const oldSet = new Set(b.leaves);
+      const newSet = new Set(a.leaves);
+      for (const leaf of a.leaves) if (!oldSet.has(leaf)) emit(r, "add", leaf);
+      for (const leaf of b.leaves) if (!newSet.has(leaf)) emit(r, "remove", null);
+      if ((a.content ?? null) !== (b.content ?? null)) emit(r, "note", a.content);
+      if ((a.summary ?? null) !== (b.summary ?? null)) emit(r, "summary", a.summary);
+      if (a.parentUid !== b.parentUid || a.ord !== b.ord) emit(r, "move", null);
+    }
+    return out.reverse(); // 新→旧
   }
 
   listRevisions(
