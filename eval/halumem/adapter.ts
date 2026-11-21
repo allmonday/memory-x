@@ -61,12 +61,8 @@ export interface RecordCase {
   probes: Probe[];
 }
 
-export function loadRecord(
-  rec: HaluMemRecord,
-  opts: { sessions?: number; offset?: number; qps?: number } = {},
-): RecordCase {
-  const from = opts.offset ?? 0;
-  const sessions = rec.sessions.slice(from, from + (opts.sessions ?? rec.sessions.length));
+export function loadRecord(rec: HaluMemRecord, opts: { sessions?: number; qps?: number } = {}): RecordCase {
+  const sessions = rec.sessions.slice(0, opts.sessions ?? rec.sessions.length);
   const isoDate = (s?: string): string | null => {
     if (!s) return null;
     const d = new Date(s);

@@ -8,7 +8,6 @@
  * 用法：
  *   npm run eval:halumem                                        # 记录1 第1场（快速验证）
  *   npm run eval:halumem -- --sessions 8                        # 冒烟（~40min）
- *   npm run eval:halumem -- --sessions 4 --offset 4               # 并行分片（第 5-8 场）
  *   npm run eval:halumem -- --sessions 65                       # 记录1 全量（~7h，nohup）
  *   npm run eval:halumem -- --record 2 --sessions 77            # 留出验证（记录2 从未参与调参）
  *   npm run eval:halumem -- --thinking low                      # 调 thinking 档位
@@ -39,14 +38,13 @@ function arg(name: string): string | undefined {
 
 const RECORD = Number(arg("record") ?? "1");
 const SESSIONS = Number(arg("sessions") ?? "1");
-const OFFSET = Number(arg("offset") ?? "0");
 const MODEL = arg("model") ?? "zai-coding-cn/glm-5.3-flash";
 const THINKING = (arg("thinking") ?? "high") as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 const QPS = Number(arg("qps") ?? "0");
 
 // ---------- 沙盒（必须在 extension 模块加载前设置，它在 import 时读 env） ----------
 const RUN_DIR = resolve("eval/halumem/runs", `${new Date().toISOString().replace(/[:.]/g, "-")}-pi`);
-const SANDBOX = join(RUN_DIR, `rec-${RECORD}${OFFSET ? `-off${OFFSET}` : ""}`);
+const SANDBOX = join(RUN_DIR, `rec-${RECORD}`);
 process.env.MEMORY_X_DIR = SANDBOX;
 await mkdir(SANDBOX, { recursive: true });
 
@@ -57,11 +55,10 @@ const rec = JSON.parse(
 ) as HaluMemRecord;
 const { turns, expectRemember, expectReplace, probes } = loadRecord(rec, {
   sessions: SESSIONS,
-  offset: OFFSET,
   qps: QPS || undefined,
 });
 console.log(
-  `pi-live：记录${RECORD} 第${OFFSET + 1}-${OFFSET + SESSIONS}场 · ${turns.length} user turns · 黄金点 ${expectRemember.length} · 更新对 ${expectReplace.length} · 题 ${probes.length} · 模型 ${MODEL} · thinking ${THINKING}\n沙盒：${SANDBOX}\n`,
+  `pi-live：记录${RECORD} 前${SESSIONS}场 · ${turns.length} user turns · 黄金点 ${expectRemember.length} · 更新对 ${expectReplace.length} · 题 ${probes.length} · 模型 ${MODEL} · thinking ${THINKING}\n沙盒：${SANDBOX}\n`,
 );
 
 // ---------- pi 会话（生产 extension + 生产系统提示词；排掉编码工具只留 memory 工具） ----------
