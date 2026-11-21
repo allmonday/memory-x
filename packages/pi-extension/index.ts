@@ -201,6 +201,50 @@ function text(
   return { content: [{ type: "text", text: t }], details };
 }
 
+/** memory_changes 的值级行展示上限（单条 from/to 文本），防长文刷屏 */
+const CHANGE_TEXT_MAX = 60;
+
+/**
+ * 把变更行按版本归组为模型友好的审计视图（新→旧）：
+ * `#id 时间 op · detail` 头 + 缩进值级行（op 路径：from/to）。
+ * 审计视角下 from→to 成对是必要信息（与节点纵向历史的去冗余口径不冲突）。
+ */
+export function formatChangesForModel(
+  changes: Array<{
+    revisionId: number;
+    revOp: string;
+    revDetail: string | null;
+    op: string;
+    path: string;
+    fromText: string | null;
+    toText: string | null;
+    createdAt: string;
+  }>,
+): string {
+  const trunc = (s: string): string =>
+    s.length > CHANGE_TEXT_MAX ? `${s.slice(0, CHANGE_TEXT_MAX)}…` : s;
+  const out: string[] = [];
+  let cur = -1;
+  for (const c of changes) {
+    if (c.revisionId !== cur) {
+      cur = c.revisionId;
+      out.push(
+        `${out.length ? "\n" : ""}#${c.revisionId} ${c.createdAt} ${c.revOp}${c.revDetail ? ` · ${c.revDetail}` : ""}`,
+      );
+    }
+    const val =
+      c.fromText != null && c.toText != null
+        ? `：${trunc(c.fromText)} → ${trunc(c.toText)}`
+        : c.toText != null
+          ? `：${trunc(c.toText)}`
+          : c.fromText != null
+            ? `：${trunc(c.fromText)}`
+            : "";
+    out.push(`   - ${c.op} ${c.path}${val}`);
+  }
+  return out.join("\n");
+}
+
 const pathParam = {
   type: "string",
   description: "节点路径，如 工作/pi生态调研（兄弟重名用 项目[2] 消歧）",
@@ -286,6 +330,35 @@ export default function memoryExtension(pi: any): void {
         body += `\n…（已截断，仅显示最近若干条；共 ${shown} 条，可用更具体的时间/叶子描述缩小范围）\n</history>`;
       }
       return text(body, { historyCount: rows.length });
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_changes",
+    label: "查最近变更",
+    description:
+      "查记忆树最近的变更（新→旧，按版本分组，值级 from→to 明细）：适合自审 tidy 落盘结果、确认写入是否生效、或新会话了解这棵树最近发生了什么。输出带版本号，可告知用户用 /memory rollback <id> 回滚。",
+    promptSnippet: "查最近全局变更（自审/了解树动态）",
+    promptGuidelines: [
+      "Use memory_changes to review recent tree activity: after a tidy batch lands, to verify a write took effect, or at session start to see what changed lately. Output is revision-grouped with value-level from→to rows.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "返回变更行数上限（默认 10，上限 30）" },
+      },
+      required: [],
+    },
+    async execute(_toolCallId: string, params: { limit?: number }) {
+      const m = await memory();
+      const limit = Math.min(Math.max(Math.trunc(params.limit ?? 10), 1), 30);
+      const rows = m.listChanges({ limit });
+      if (rows.length === 0) return text("暂无变更记录（新库，或历史窗口已被裁剪）。", { count: 0 });
+      const body = formatChangesForModel(rows);
+      return text(
+        `最近变更（新→旧，按版本分组，limit=${limit} 行）：\n${body}\n\n（回滚某版本可告知用户执行：/memory rollback <id>）`,
+        { count: rows.length },
+      );
     },
   });
 
@@ -735,7 +808,7 @@ export default function memoryExtension(pi: any): void {
     event.systemPromptOptions.sections.memory = [
       "长期记忆树目录（[n]=子树叶子总数，机器本地存储）：",
       cachedToc,
-      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；查节点历史值（旧值/演变）用 memory_history(path)；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
+      "规则：需背景先 memory_read 下钻；不确定位置先 memory_search；查节点历史值（旧值/演变）用 memory_history(path)；看最近全局变更（自审 tidy 落盘/新会话了解树动态）用 memory_changes(limit)；出现跨会话价值的结论/决策/实体/待办时 memory_upsert 主动记（一条一事+日期）；若本轮使某条已有记忆过时/被取代，用 memory_update(path, match, leaf) 原地替换（match=被替换原文，须逐字一致且唯一），不要新增重复条；长正文（超一条叶子）用 memory_write_note 写成 Markdown；目录里的「：摘要」仅导航用，可用 memory_summary 刷新；结构性整理走 /memory tidy（受审的结构化操作）；勿猜路径。",
       `写入规范：${WRITE_STYLE}`,
     ].join("\n");
 

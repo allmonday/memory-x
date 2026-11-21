@@ -42,7 +42,7 @@ pi -e /你的路径/memory-x/packages/pi-extension/index.ts
 flowchart TB
     subgraph EXT["pi 扩展 · @memory-x/pi-extension"]
         direction LR
-        TOOLS["工具面<br/>read · history · search · upsert · update · write_note<br/>move · delete · summary · propose · stats<br/>evidence · link_evidence · diary"]
+        TOOLS["工具面<br/>read · history · changes · search · upsert · update · write_note<br/>move · delete · summary · propose · stats<br/>evidence · link_evidence · diary"]
         INJ["注入（双 section · 差分对齐）<br/>memory 目录 + 规则（稳定，变更才补发）<br/>memory_recall 本轮相关记忆（话题切换才换）"]
     end
 
@@ -79,6 +79,7 @@ flowchart TB
 - **整理（tidy）**：模型读记忆树（Markdown 只作只读 review 视图）→ 调 `memory_propose(ops)` 提交**结构化操作列表**（`add_leaf`/`update_leaf`/`remove_leaf`/`rename`/`move`/`add_node`/`delete`/`set_note`/`set_summary`）→ **直接落盘为一个版本**（对克隆树先干跑校验，失败整批回滚；成功则按序原子应用）。不重写整棵树，未提及的节点保持不变。本轮 tidy 的变更可在 `/memory changes`（按版本分组）看到，`/memory rollback <id>` 回滚。
 - **可回滚**：任意版本由「当前态 + 逆推 `revision_id > target` 的 undo 行」物化；`/memory rollback <id>` 只是再落一版，不改写历史，因此可前滚。`/memory changes` 的逐条变更由 undo 行 + 物化态**派生**，不另占存储。
 - **节点历史（memory_history）**：按 path 查某节点全部历史值（新→旧），从 undo log 同一机制派生；每个值只出现在写入它的那个版本，无 from/to 冗余。模型不需要知道 revision id；已删除节点按历史路径兑底可查。
+- **最近变更（memory_changes）**：模型侧的全局审计视图——最近变更按版本分组（新→旧），值级 from→to 明细，用于自审 tidy 落盘、确认写入生效、新会话了解树动态；输出带版本号可直接转告用户 /memory rollback。与 `/memory changes` 同源（listChanges）但面向模型，无需 revision id 入参。
 
 ## 使用
 
