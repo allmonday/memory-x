@@ -1231,7 +1231,17 @@ export class MemoryStore {
   /** 按本地日历日聚合：sessions（episodes 分组）+ 动过的节点（changes 聚合到前 3 层路径）+ 素材水位。 */
   dayDigest(date: string): DayDigest {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`日期格式应为 YYYY-MM-DD：${date}`);
-    const day = (col: string) => `date(${col}, 'localtime') = '${date}'`; // date 已过正则校验
+    // 当地日历日的 UTC 边界（created_at 存 UTC）。用可索引的区间比较代替
+    // date(col,'localtime')=…（函数谓词吃不上 idx_episodes_created_at，episodes
+    // 只增不减，量上去后全表扫逐行求值 date() 会劣化到几百 ms）。
+    // 边界 = 当地零点 + 24h；无 DST 时区（如东八区）与 SQLite localtime 语义完全等价。
+    const start = new Date(`${date}T00:00:00`); // 无时区后缀 = 本地时间
+    const end = new Date(start.getTime() + 86_400_000);
+    const pad = (n: number): string => String(n).padStart(2, "0");
+    const utcStr = (d: Date): string =>
+      `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+      `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+    const day = (col: string) => `${col} >= '${utcStr(start)}' AND ${col} < '${utcStr(end)}'`; // date 已过正则校验
     const sessions = (
       this.db
         .prepare(
