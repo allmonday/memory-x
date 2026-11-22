@@ -7,7 +7,7 @@ export { withDirLock } from "./lock.ts";
 export { diffTrees, diffToChangeRows, flattenTree, type TreeDiff, type LeafRef, type NodeRef } from "./tree-diff.ts";
 export { diffLines, diffStats, formatDiff, type DiffLine } from "./diff.ts";
 export { lintTree, suggestPath, type LintIssue, type LintOptions } from "./lint.ts";
-export { MemoryStore, STORE_DIR, DB_FILE, escapeLike, leafHash, ensureUids, type SearchHit, type Episode, type EvidenceRef, type ChangeRow, type HistoryRow, type NodeState, type DeltaEntry, type DayDigest } from "./store.ts";
+export { MemoryStore, STORE_DIR, DB_FILE, escapeLike, leafHash, ensureUids, type SearchHit, type Episode, type EvidenceRef, type ChangeRow, type HistoryRow, type NodeMetaState, type DeltaEntry, type LeafDeltaEntry, type TreeDelta, type DayDigest } from "./store.ts";
 export { parsePath, resolvePath, splitDisambig, levenshtein, enumerateNodePaths, canonicalPathOf } from "./path.ts";
 export { upsertNode, moveNode, deleteNode, stripDateMark } from "./ops.ts";
 export { applyOps, OpError, TREE_OP_NAMES, type TreeOp } from "./ops-batch.ts";

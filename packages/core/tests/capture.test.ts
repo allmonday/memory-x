@@ -84,8 +84,7 @@ test("changes：update 记录旧值→新值；writeSummary 记录 note-summary"
   await mf.updateNode("工作/甲", "旧", "新");
   await mf.writeSummary("工作/甲", "摘要");
   const changes = mf.listChanges({ limit: 100 });
-  assert.ok(changes.some((c) => c.op === "remove" && c.fromText === "旧"));
-  assert.ok(changes.some((c) => c.op === "add" && c.toText === "新"));
+  assert.ok(changes.some((c) => c.op === "update" && c.fromText === "旧" && c.toText === "新"), "update 一行携 from→to");
   assert.ok(changes.some((c) => c.op === "note-summary" && c.path === "工作/甲"));
 });
 

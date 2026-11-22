@@ -54,6 +54,7 @@ export function upsertNode(root: MemoryNode, path: string, leaf: string): Upsert
     return { changed: false, resolvedPath: walked.join("/"), createdNodes: created };
   }
   current.leaves.push(leaf);
+  if (current.leafUids) current.leafUids.push(null); // 无身份：写入时按文本收养或新发
   return { changed: true, resolvedPath: walked.join("/"), createdNodes: created };
 }
 

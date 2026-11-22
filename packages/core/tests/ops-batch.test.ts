@@ -168,7 +168,7 @@ test("applyOps：落盘为一版，detail 与 changes 可查（含 revOp/revDeta
   const rows = mf.listChanges({ revisionId: rev });
   assert.ok(rows.length > 0);
   assert.ok(rows.every((c) => c.revisionId === rev && c.revOp === "tidy" && c.revDetail === "整理说明X"));
-  assert.ok(rows.some((c) => c.op === "add" && c.toText === "新"));
+  assert.ok(rows.some((c) => c.op === "update" && c.fromText === "旧" && c.toText === "新"));
 });
 
 test("MemoryFile.previewOps：对克隆树试跑，不改动真树", async () => {

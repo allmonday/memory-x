@@ -91,6 +91,7 @@ function applyOne(root: MemoryNode, op: TreeOp, i: number): boolean {
       if (typeof op.leaf !== "string" || op.leaf.trim() === "") throw new OpError(i, op.op, "leaf 为空");
       if (r.node.leaves.includes(op.leaf)) return false;
       r.node.leaves.push(op.leaf);
+      r.node.leafUids?.push(null); // 无身份：写入时按文本收养或新发
       return true;
     }
     case "update_leaf": {
@@ -105,9 +106,12 @@ function applyOne(root: MemoryNode, op: TreeOp, i: number): boolean {
     case "remove_leaf": {
       const r = mustResolve(root, op.path, op.op, i);
       const m = stripDateMark(op.match);
-      const hits = r.node.leaves.filter((l) => stripDateMark(l) === m).length;
-      if (hits !== 1) throw new OpError(i, op.op, `match 须唯一命中（日期尾巴已归一化；当前 ${hits} 次）：${op.match}`);
-      r.node.leaves = r.node.leaves.filter((l) => stripDateMark(l) !== m);
+      const idx = r.node.leaves.findIndex((l) => stripDateMark(l) === m);
+      if (idx < 0) throw new OpError(i, op.op, `match 须唯一命中（日期尾巴已归一化；当前 0 次）：${op.match}`);
+      if (r.node.leaves.filter((l) => stripDateMark(l) === m).length !== 1)
+        throw new OpError(i, op.op, `match 须唯一命中（日期尾巴已归一化）：${op.match}`);
+      r.node.leaves.splice(idx, 1); // 索引同步剪，保持 leafUids 对齐
+      r.node.leafUids?.splice(idx, 1);
       return true;
     }
     case "rename": {

@@ -116,7 +116,7 @@ test("迁移：旧库整树快照 → uid 回填、历史重置为 baseline、�
   const cols = (db.prepare("PRAGMA table_info(revisions)").all() as Array<{ name: string }>).map((c) => c.name);
   assert.ok(!cols.includes("tree"), "revisions 不应再有 tree 列");
   const changeCols = (db.prepare("PRAGMA table_info(changes)").all() as Array<{ name: string }>).map((c) => c.name);
-  assert.deepEqual(changeCols, ["revision_id", "uid", "path", "deleted", "before"], "changes 为新 undo log 结构");
+  assert.deepEqual(changeCols, ["revision_id", "uid", "path", "deleted", "before", "before_leaves"], "changes 为新 undo log 结构");
   const nulls = (db.prepare("SELECT COUNT(*) AS n FROM nodes WHERE uid IS NULL").get() as { n: number }).n;
   assert.equal(nulls, 0, "uid 已回填");
   const distinct = (db.prepare("SELECT COUNT(DISTINCT uid) AS n FROM nodes").get() as { n: number }).n;

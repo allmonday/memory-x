@@ -360,6 +360,7 @@ export class MemoryFile {
     return this.mutate("restore", `#${id}`, (root) => {
       root.title = tree.title;
       root.leaves = [...tree.leaves];
+      root.leafUids = tree.leafUids ? [...tree.leafUids] : undefined;
       root.content = tree.content;
       root.summary = tree.summary;
       root.summaryHash = tree.summaryHash;
@@ -391,8 +392,8 @@ export class MemoryFile {
         return { ok: res.ok ?? true, path: res.path, revision: null, changed: false };
       }
       ensureUids(this.root); // 新节点补发稳定 uid（在 diff 前）
-      const delta = this.store.applyDelta(this.base, this.root); // 节点级增量写 + uid 空间 undo
-      if (delta.length === 0) {
+      const delta = this.store.applyDelta(this.base, this.root); // 节点元数据 + 叶级增量写，undo 行叶级化
+      if (delta.nodes.length === 0 && delta.leaves.length === 0) {
         this.base = structuredClone(this.root);
         return { ok: true, path: res.path, revision: null, changed: false };
       }
