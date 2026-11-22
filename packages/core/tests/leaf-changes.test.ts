@@ -72,7 +72,7 @@ test("回滚：叶子 update/remove 后可精确恢复（含顺序）", async ()
   assert.deepEqual(mf.readSection("域")!.node.leaves, ["一", "二"], "回滚恢复 update 前文本与顺序");
 });
 
-test("迁移：旧格式 before（含 leaves 数组）拆为元数据 + before_leaves blob，历史可读可回滚", async () => {
+test("迁移：旧格式 before（含 leaves 数组）拆为元数据并回填叶级行，历史可读可回滚", async () => {
   const dir = await tmpDir();
   await mkdir(join(dir, ".memory"), { recursive: true });
   const raw = new DatabaseSync(join(dir, ".memory", "memory.db"));
@@ -108,9 +108,17 @@ test("迁移：旧格式 before（含 leaves 数组）拆为元数据 + before_l
     db.prepare("SELECT COUNT(*) AS n FROM changes WHERE before LIKE '%\"leaves\"%'").get() as { n: number }
   ).n;
   const blobs = (db.prepare("SELECT COUNT(*) AS n FROM changes WHERE before_leaves IS NOT NULL").get() as { n: number }).n;
+  const backfilled = db
+    .prepare("SELECT kind, after_text FROM leaf_changes ORDER BY revision_id")
+    .all() as Array<{ kind: string; after_text: string | null }>;
   db.close();
   assert.equal(legacyLeft, 0, "旧格式 before 已拆分");
-  assert.ok(blobs >= 1, "leaves 数组保留在 before_leaves blob");
+  assert.equal(blobs, 0, "blob 已进一步回填为叶级行（before_leaves 清空）");
+  assert.deepEqual(
+    backfilled.map((r) => `${r.kind}:${r.after_text}`),
+    ["add:旧二"],
+    "回填行 = 点时 diff（blob [旧一] → 末态 [旧一,旧二]）",
+  );
   // 历史可读：旧版本的 add 可见
   const hist = mf.nodeHistory("工作").rows;
   assert.ok(hist.some((r) => r.op === "add" && r.value === "旧二"), "跨版本 set-diff 可见旧增量");

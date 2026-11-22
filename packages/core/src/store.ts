@@ -406,6 +406,18 @@ export class MemoryStore {
     }
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_leaves_uid ON leaves(uid)");
 
+    // 节点稳定身份：旧代码（INSERT 不带 uid 列）删光重插会丢节点 uid，破坏 uid 寻址
+    // （currentByUid 的 parentUid 解析 → 假根 → materializeTree 树漂移）。每次打开补一次。
+    {
+      const rows = this.db.prepare("SELECT id FROM nodes WHERE uid IS NULL OR uid = ''").all() as Array<{ id: number }>;
+      if (rows.length > 0) {
+        const upd = this.db.prepare("UPDATE nodes SET uid = ? WHERE id = ?");
+        this.db.exec("BEGIN");
+        for (const r of rows) upd.run(randomUUID(), r.id);
+        this.db.exec("COMMIT");
+      }
+    }
+
     // 旧格式 undo 行（before 含全量 leaves 数组）→ 新格式：元数据行 + before_leaves 整体 blob。
     // 不拆叶级行：拆行体积膨胀 ~2x 且旧快照本就拆不出真实增删；blob 保留 undo/展示所需的旧态全量。
     // 幂等：拆完 before 不再含 "leaves" 键，不再命中。
@@ -433,6 +445,23 @@ export class MemoryStore {
         }
         this.db.exec("COMMIT");
         destructive = true; // 触发 VACUUM 回收
+      }
+    }
+
+    // 旧格式 blob → 叶级行回填（根治「与当前态 set-diff」的漂移）：
+    // 同节点相邻 blob 两两即点时快照；末行用 materializeTree 重放末态（真实 uid）。
+    // 回填后清空 before_leaves，读取/回滚统一走叶级行；校验失败整体放弃（blob 保留走旧兜底）。
+    {
+      const legacyRows = this.db
+        .prepare("SELECT revision_id, uid, path, before_leaves FROM changes WHERE before_leaves IS NOT NULL ORDER BY uid, revision_id")
+        .all() as Array<{ revision_id: number; uid: string; path: string; before_leaves: string }>;
+      if (legacyRows.length > 0 && process.env.MX_NO_BACKFILL !== "1") {
+        try {
+          this.backfillLegacyLeaves(legacyRows);
+          destructive = true; // blob 已清，VACUUM 回收
+        } catch (e) {
+          if (process.env.MX_DEBUG) console.error("legacy leaf backfill skipped:", e);
+        }
       }
     }
 
@@ -1068,7 +1097,7 @@ export class MemoryStore {
       }
       seenRevs.push(r.revision_id);
       const m = JSON.parse(r.before) as NodeMetaState;
-      chain.push({ title: m.title, content: m.content, summary: m.summary, leaves: r.before_leaves == null ? null : (JSON.parse(r.before_leaves) as string[]) });
+      chain.push({ title: m.title, content: m.content, summary: m.summary, leaves: MemoryStore.parseLeavesBlob(r.before_leaves) });
     }
     flush();
     return new Map([...revs].map(([k, s]) => [k, s.size]));
@@ -1087,6 +1116,17 @@ export class MemoryStore {
    * update 的新值列在其写入版本，旧值仍在它自己的写入版本可见——同 uid 链即「这条事实的演变」。
    * restore 行（旧格式迁移产物）不展示：历史快照无法拆出真实增删。
    */
+  /** 安全解析 before_leaves blob：非数组/坏 JSON 一律返回 null（读取层容错，等价无 blob）。 */
+  private static parseLeavesBlob(s: string | null): string[] | null {
+    if (s == null) return null;
+    try {
+      const v = JSON.parse(s) as unknown;
+      return Array.isArray(v) ? (v as string[]) : null;
+    } catch {
+      return null;
+    }
+  }
+
   listNodeHistory(uid: string): HistoryRow[] {
     const nodeRows = this.db
       .prepare(
@@ -1139,7 +1179,7 @@ export class MemoryStore {
     for (let i = 0; i < nodeRows.length; i++) {
       const r = nodeRows[i]!;
       const b: NodeMetaState | null = r.before == null ? null : (JSON.parse(r.before) as NodeMetaState);
-      const bLeaves: string[] | null = r.before_leaves == null ? null : (JSON.parse(r.before_leaves) as string[]);
+      const bLeaves: string[] | null = MemoryStore.parseLeavesBlob(r.before_leaves);
       const nextRow = nodeRows[i + 1];
       const a: NodeMetaState | null = nextRow
         ? nextRow.before == null
@@ -1151,7 +1191,7 @@ export class MemoryStore {
           ? null
           : nextRow.before_leaves == null
             ? null
-            : (JSON.parse(nextRow.before_leaves) as string[])
+            : (MemoryStore.parseLeavesBlob(nextRow.before_leaves) as string[])
         : currentLeaves;
       if (bLeaves != null) {
         // 旧格式行：快照级 set-diff（叶级身份是迁移后才有的）
@@ -1430,10 +1470,11 @@ export class MemoryStore {
           const order = meta.leafOrder;
           delete meta.leafOrder;
           nodes.set(r.uid, { path: r.path, meta, leaves: [] });
-          if (r.before_leaves != null) {
+          const lb = MemoryStore.parseLeavesBlob(r.before_leaves);
+          if (lb != null) {
             // 旧格式行：blob 即该版本前的全量叶子（拆不出叶级 diff，整体替换）
             for (const [k, v] of leafMap) if (v.nodeUid === r.uid) leafMap.delete(k);
-            legacyLeaves.set(r.uid, JSON.parse(r.before_leaves) as string[]);
+            legacyLeaves.set(r.uid, lb);
           } else {
             legacyLeaves.delete(r.uid);
             if (order) {
@@ -1450,8 +1491,138 @@ export class MemoryStore {
     return this.treeFromUid(nodes, leafMap, legacyLeaves);
   }
 
+  /**
+   * 旧格式 before_leaves blob → 叶级行回填（一次性迁移，事务内自校验，失败拖齐回滚）。
+   * 链式穿线：按节点分组升序走 blob 链，多重集 diff 出逐版本 add/remove；
+   * add 的 uid 优先收养「末态重放（materializeTree）」里同文本的未认领 uid，收养不到新发；
+   * remove 的 uid 消耗该文本的链内存活身份（与引入它的 add 配对，保证回放可逆）。
+   * 校验：清 blob 后逐行 materializeTree(rev-1)，节点叶集（多重集）必须还原为原 blob。
+   */
+  private backfillLegacyLeaves(
+    legacyRows: Array<{ revision_id: number; uid: string; path: string; before_leaves: string }>,
+  ): void {
+    type Row = { revision_id: number; uid: string; path: string; leaves: string[] };
+    const byUid = new Map<string, Array<Row>>();
+    const parsed: Array<Row> = [];
+    for (const r of legacyRows) {
+      let leaves: string[];
+      try {
+        const v = JSON.parse(r.before_leaves) as unknown;
+        if (!Array.isArray(v)) continue;
+        leaves = v.map((t) => String(t));
+      } catch {
+        continue; // 坏行保留 blob，读取层走旧兜底
+      }
+      const row: Row = { revision_id: r.revision_id, uid: r.uid, path: r.path, leaves };
+      parsed.push(row);
+      let arr = byUid.get(r.uid);
+      if (!arr) {
+        arr = [];
+        byUid.set(r.uid, arr);
+      }
+      arr.push(row);
+    }
+    if (parsed.length === 0) return;
+    const findNode = (n: MemoryNode, uid: string): MemoryNode | null => {
+      if (n.uid === uid) return n;
+      for (const c of n.children ?? []) {
+        const hit = findNode(c, uid);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    type Ins = {
+      revisionId: number;
+      leafUid: string;
+      nodeUid: string;
+      path: string;
+      kind: "add" | "remove";
+      beforeText: string | null;
+      afterText: string | null;
+      beforeOrd: number | null;
+    };
+    const inserts: Array<Ins> = [];
+    for (const [uid, chain] of byUid) {
+      // 末态：链最后一行 legacy 之后的真实状态（携带真实 uid）
+      const last = chain[chain.length - 1]!;
+      const endTree = this.materializeTree(last.revision_id);
+      const endNode = endTree ? findNode(endTree, uid) : null;
+      const endTexts = endNode?.leaves ?? [];
+      const endUids = endNode?.leafUids ?? [];
+      // 未认领池：末态 text → uid 队列（链内 add 优先收养）
+      const pool = new Map<string, string[]>();
+      for (let j = 0; j < endTexts.length; j++) {
+        const u = endUids[j];
+        if (!u) continue;
+        const q = pool.get(endTexts[j]!) ?? [];
+        q.push(u);
+        pool.set(endTexts[j]!, q);
+      }
+      // 链内存活身份：text → uid 队列（remove 消耗，与引入它的 add 配对）
+      const live = new Map<string, string[]>();
+      for (let i = 0; i < chain.length; i++) {
+        const cur = chain[i]!;
+        const after = i + 1 < chain.length ? chain[i + 1]!.leaves : endTexts;
+        // 多重集匹配：match(t) = min(前后出现次数)；两侧超出部分即 remove/add
+        const afterCount = new Map<string, number>();
+        for (const t of after) afterCount.set(t, (afterCount.get(t) ?? 0) + 1);
+        const beforeCount = new Map<string, number>();
+        for (const t of cur.leaves) beforeCount.set(t, (beforeCount.get(t) ?? 0) + 1);
+        const match = new Map<string, number>();
+        for (const [t, c] of beforeCount) match.set(t, Math.min(c, afterCount.get(t) ?? 0));
+        const seenBefore = new Map<string, number>();
+        for (let j = 0; j < cur.leaves.length; j++) {
+          const t = cur.leaves[j]!;
+          const kb = seenBefore.get(t) ?? 0;
+          seenBefore.set(t, kb + 1);
+          if (kb < (match.get(t) ?? 0)) continue; // 存活（第 kb 次出现 < 匹配配额）：无行
+          const q = live.get(t);
+          const leafUid = q && q.length > 0 ? q.shift()! : randomUUID();
+          inserts.push({ revisionId: cur.revision_id, leafUid, nodeUid: uid, path: cur.path, kind: "remove", beforeText: t, afterText: null, beforeOrd: j });
+        }
+        const seen = new Map<string, number>();
+        for (const t of after) {
+          const k = seen.get(t) ?? 0;
+          seen.set(t, k + 1);
+          if (k < (match.get(t) ?? 0)) continue; // 存活：无行
+          const pq = pool.get(t);
+          const leafUid = pq && pq.length > 0 ? pq.shift()! : randomUUID();
+          const lq = live.get(t) ?? [];
+          lq.push(leafUid);
+          live.set(t, lq);
+          inserts.push({ revisionId: cur.revision_id, leafUid, nodeUid: uid, path: cur.path, kind: "add", beforeText: null, afterText: t, beforeOrd: null });
+        }
+      }
+    }
+    const ins = this.db.prepare(
+      "INSERT OR REPLACE INTO leaf_changes(revision_id, leaf_uid, node_uid, path, kind, before_text, after_text, before_node_uid, before_ord) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    const clr = this.db.prepare("UPDATE changes SET before_leaves = NULL WHERE revision_id = ? AND uid = ?");
+    this.db.exec("BEGIN");
+    try {
+      for (const x of inserts)
+        ins.run(x.revisionId, x.leafUid, x.nodeUid, x.path, x.kind, x.beforeText, x.afterText, x.kind === "remove" ? x.nodeUid : null, x.beforeOrd);
+      for (const r of parsed) clr.run(r.revision_id, r.uid);
+      // 校验：清 blob 后重放，每个节点的版本前叶集（多重集）应还原为原 blob
+      for (const r of parsed) {
+        if (r.revision_id <= 1) continue;
+        const tree = this.materializeTree(r.revision_id - 1);
+        const node = tree ? findNode(tree, r.uid) : null;
+        if (!node) continue; // 该版本前节点尚未创建（创建行在更低版本），无从比对
+        const got = [...node.leaves].sort().join("\u0001");
+        const want = [...r.leaves].sort().join("\u0001");
+        if (got !== want)
+          throw new Error(`legacy backfill 校验失败：#${r.revision_id} ${r.path} 重放叶集与原快照不符`);
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   /** 某版本相对上一版本的变更（git log 风格）：叶级行直出 from→to，元数据行走链式对比。 */
-  private deriveChanges(revisionId: number, cap: number): ChangeRow[] {
+  private deriveChanges(revisionId: number): ChangeRow[] {
     const rev = this.db
       .prepare("SELECT id, op, detail, created_at FROM revisions WHERE id = ?")
       .get(revisionId) as { id: number; op: string; detail: string | null; created_at: string } | undefined;
@@ -1477,19 +1648,17 @@ export class MemoryStore {
     const curAll = this.currentByUid();
     const out: ChangeRow[] = [];
     const push = (op: string, path: string, uid: string, from: string | null, to: string | null) => {
-      if (out.length < cap) {
-        out.push({
-          revisionId,
-          revOp: rev.op,
-          revDetail: rev.detail,
-          op,
-          path,
-          uid,
-          fromText: from,
-          toText: to,
-          createdAt: rev.created_at,
-        });
-      }
+      out.push({
+        revisionId,
+        revOp: rev.op,
+        revDetail: rev.detail,
+        op,
+        path,
+        uid,
+        fromText: from,
+        toText: to,
+        createdAt: rev.created_at,
+      });
     };
     for (const l of leafRows) {
       if (l.kind === "restore") continue; // 旧格式快照，无从拆分真实增删
@@ -1505,7 +1674,7 @@ export class MemoryStore {
         continue;
       }
       const b = JSON.parse(r.before) as NodeMetaState;
-      const bLeaves = r.before_leaves == null ? null : (JSON.parse(r.before_leaves) as string[]);
+      const bLeaves = MemoryStore.parseLeavesBlob(r.before_leaves);
       if (r.deleted) {
         push("remove-node", r.path, r.uid, b.title, null);
         if (bLeaves) for (const leaf of bLeaves) push("remove", r.path, r.uid, leaf, null);
@@ -1521,7 +1690,7 @@ export class MemoryStore {
         const aL = nextRow
           ? nextRow.before_leaves == null
             ? null
-            : (JSON.parse(nextRow.before_leaves) as string[])
+            : (MemoryStore.parseLeavesBlob(nextRow.before_leaves) as string[])
           : (curAll.get(r.uid)?.leaves.map((l) => l.text) ?? null);
         if (aL != null) {
           const oldSet = new Set(bLeaves);
@@ -1539,16 +1708,19 @@ export class MemoryStore {
   }
   listChanges(opts: { revisionId?: number; limit?: number } = {}): ChangeRow[] {
     const limit = opts.limit ?? 50;
-    if (opts.revisionId != null) return this.deriveChanges(opts.revisionId, limit);
+    if (opts.revisionId != null) return this.deriveChanges(opts.revisionId);
     const revs = this.db
       .prepare("SELECT id FROM revisions ORDER BY id DESC LIMIT ?")
       .all(Math.max(limit * 2, 50)) as Array<{ id: number }>;
     const out: ChangeRow[] = [];
     for (const r of revs) {
-      out.push(...this.deriveChanges(r.id, limit - out.length));
+      const rows = this.deriveChanges(r.id);
+      // 预算不足时按整版本取舍：不截断半版本（避免 add 先入 remove 被吞的不对称）；首版本允许溢出。
+      if (out.length > 0 && out.length + rows.length > limit) break;
+      out.push(...rows.slice(0, Math.max(limit, 12))); // 单版本行数防爆（子树删除等）
       if (out.length >= limit) break;
     }
-    return out.slice(0, limit);
+    return out;
   }
 
   // ---------- 原始证据（episodes / evidence） ----------
