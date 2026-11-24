@@ -35,31 +35,9 @@ export interface HaluMemRecord {
   sessions: HaluMemSession[];
 }
 
-export interface Probe {
-  question: string;
-  answer?: string | null;
-  /** 对抗题：材料里没有的信息，应拒绝作答而非编造 */
-  refuse?: boolean;
-  /** 分类标签（HaluMem question_type），分桶统计 */
-  tag?: string;
-}
-
-/** 更新对：同一事实的旧表述应被新表述替换（supersede 考核单元） */
-export interface ReplacePair {
-  old: string;
-  neu: string;
-}
-
-export interface RecordCase {
-  /** user 发言（时间序；assistant 轮不喂——pi 会话里由被测 agent 自己生成回复）；date=对话日期（ISO） */
-  turns: Array<{ content: string; date: string | null }>;
-  /** 黄金点（非更新）：该被记住的事实 */
-  expectRemember: string[];
-  /** 更新对：旧值应被替换为新值 */
-  expectReplace: ReplacePair[];
-  /** 问答探针 */
-  probes: Probe[];
-}
+// 公共类型已上移 eval/pi-live/types.ts（HaluMem/LoCoMo 共用）；此处 re-export 保持旧导入兼容
+import type { Probe, RecordCase, ReplacePair } from "../pi-live/types.ts";
+export type { Probe, RecordCase, ReplacePair } from "../pi-live/types.ts";
 
 export function loadRecord(rec: HaluMemRecord, opts: { sessions?: number; qps?: number } = {}): RecordCase {
   const sessions = rec.sessions.slice(0, opts.sessions ?? rec.sessions.length);

@@ -8,7 +8,7 @@
  *   已弃用旧的全树词面口径：它在近义改写型数据上会全量误报
  *   （pi-live 冒烟实测：全树口径 0.000 vs 叶级口径 0.917，真失败仅 2/24）。
  */
-import type { ReplacePair } from "../halumem/adapter.ts";
+import type { ReplacePair } from "../pi-live/types.ts";
 
 const STOP = new Set(
   "the a an is are was were be been being of to in on at for with and or but not no do does did this that these those i you he she it we they me him her them my your his its our their as by from what when where who whom which how why".split(/\s+/),

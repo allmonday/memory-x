@@ -6,9 +6,10 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test packages/core/tests/*.test.ts",
+    "test": "node --test packages/core/tests/*.test.ts eval/tests/*.test.ts",
     "crash-verify": "node scripts/crash-verify.ts",
     "eval:halumem": "node scripts/halumem-eval.ts",
+    "eval:locomo": "node scripts/locomo-eval.ts",
     "ui": "node scripts/ui.ts"
   },
   "bin": {
