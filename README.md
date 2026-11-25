@@ -155,13 +155,18 @@ npm link && memory-x ui         # 装成全局命令后，任意目录可用（�
 ## 测试与评估
 
 ```bash
-npm test              # 119 项：文法/路径/操作/存储/版本回滚/检索/整理/迁移/锁/fuzz/并发写/采集/日记
+npm test               # 163 项：文法/路径/操作/存储/版本回滚/检索/整理/迁移/锁/fuzz/并发写/采集/日记/评测装载/判分形态
 npm run eval:halumem   # HaluMem 记忆评测（pi-live：pi SDK 真实会话 × 生产 extension，见 eval/halumem/README.md）
-npm run crash-verify  # 写入中 SIGKILL，验证 db 完好（WAL）
+npm run eval:locomo    # LoCoMo 长对话记忆评测（同一套 pi-live runner，见 eval/locomo/README.md）
+npm run eval:rejudge -- eval/locomo/runs/<ts>-pi/summary.json   # 判分口径迭代后重判已存答案（不重跑）
+npm run crash-verify   # 写入中 SIGKILL，验证 db 完好（WAL）
 ```
 
 运行时零依赖（**Node ≥ 23.6**，`node:sqlite` + 原生 TS 直跑，扩展/核心库不需要 npm install、不需要系统 SQLite、运行时不碰 git）；评测脚本需要 `npm install`（devDependency：pi SDK）。
-当前评测水位（记录 1）：pi-live 组合问答 0.738（全量重跑外推 ≈0.84）、recall 0.955、precision 叶级 0.856——详见 eval/halumem/README.md。
+当前评测水位（pi-live 口径：pi SDK 真实会话 × 生产 extension × 判分与被测分流）：
+
+- **HaluMem**（记录 1 调参集 / 记录 2 留出集）：记录 1 组合问答 0.738（全量重跑外推 ≈0.84）、recall 0.955、precision 叶级 0.856；记录 2 留出全量 QA **0.793**、recall 0.986、precision 叶级 0.941——详见 eval/halumem/README.md。
+- **LoCoMo**（外部第三方留出裁判，conv-26 单卷，2026-11-25）：**QA 169/199 = 0.849**（判分口径修订后重测，旧口径 0.709）；五桶 Single-hop 0.89 · Multi-hop 0.78 · Temporal 0.77 · Open-domain 0.86 · **Adversarial 0.87**（cat5 说话人对调陷阱 41/47 识破并纠正归属，无编造）。30 道失败逐题归因：数据集问题 ~15（多模态金标不可达 / 金标噪声 / 可答误标对抗题）、判分残留 ~4、真实记忆缺口仅 ~6-8——排除后单卷 ceiling ≈ 0.90+。与 HaluMem 同梯队，第一梯队结论获独立数据集交叉验证。详见 eval/locomo/README.md。
 
 ## 路线图
 
@@ -173,7 +178,7 @@ npm run crash-verify  # 写入中 SIGKILL，验证 db 完好（WAL）
 - [x] 整理（做梦）：手动触发，草稿-人审-落盘三段式
 - [x] P4 原始证据采集（episodes 永久保留 + evidence 溯源链接）
 - [x] 日记（dayDigest 按日派生 + memory_diary 读穿缓存 + 弱视图兑底）
-- [x] pi-live 评测体系（pi SDK 真实会话 × 生产 extension；HaluMem 基准，判分分流）
+- [x] pi-live 评测体系（pi SDK 真实会话 × 生产 extension；HaluMem + LoCoMo 双基准，判分分流 + 重判工作流）
 - [ ] M2 软更新替换（偏好/关系类演变的隐式 supersede；评测已知主要缺口，precision 0.856）
 - [ ] M5 语义向量层（bge-small-zh + RRF 融合；检索层实测非瓶颈，低优先）
 
