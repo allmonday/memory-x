@@ -10,7 +10,8 @@
     "crash-verify": "node scripts/crash-verify.ts",
     "eval:halumem": "node scripts/halumem-eval.ts",
     "eval:locomo": "node scripts/locomo-eval.ts",
-    "ui": "node scripts/ui.ts"
+    "ui": "node scripts/ui.ts",
+    "eval:rejudge": "node scripts/rejudge.ts"
   },
   "bin": {
     "memory-x": "bin/memory-x.mjs",

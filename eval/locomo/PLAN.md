@@ -33,13 +33,27 @@
 - `npm run eval:locomo`，沙盒 `eval/locomo/runs/<ts>-pi/<sample_id>/`（一进程一沙盒）；微型 fixture（7 turns/3 题）端到端 3/3：开场声明/日期前缀/拒答题判分/usage 计量/summary.json（含 evidence + adversarialAnswer）全部生效。
 - 观察项（非门槛）：节点标题语言靠模型自觉（tiny 跑出中文标题+英文叶子；halumem 基线为英文标题；叶级指标不受影响）——机械护栏属上下文锚定 P1 范畴，不在本计划。
 
-### P3 — 单对话冒烟验收（conv-1，419 turns/199 题，~5-6h nohup）｜当天挂后台
-**验收标准（机制性）**：
-- [ ] exit 0，summary.json 落盘；turn 数=419、题数=199、五桶分布与金标一致
-- [ ] 叶子全英文（无语言漂移）；叶子日期戳=对话日期（抽查）
-- [ ] 无巨节点异常（叶子数 100~400 量级合理）、无异常长叶占比超标
-- [ ] QA ≥ 0.55（「链路未坏」底线；halumem 首场 0.85 的 LoCoMo 难度折算，正式水位看 P4）
-- [ ] 记录 compaction 是否首次触发（观察点：halumem 1403 turns 未触发）
+### P3 — 单对话冒烟验收（conv-1，419 turns/199 题）✅（2026-11-25，70min，远快于 6h 估）
+**机制性验收：全过**
+- [x] exit 0，summary.json 落盘；turn 419/题 199/五桶分布与金标一致
+- [x] 叶子 132 条全英文；日期戳 132/132=对话日期（100%）；叶数在 100~400 区间
+- [x] QA 141/199 = **0.709**（≥0.55 底线）；70min；update 59 次（supersede 活跃）
+- [x] compaction 未触发（419 turns + 199 Q 单会话）；单对话被测 input 39.9M tokens（cacheRead 21.8M，同会话 QA 代价）
+
+**归因发现（58 失败逐题，全量归因超额完成 ≥30 采样要求）**：
+1. **Adversarial 判分口径 artifact（~23 题）**：LoCoMo cat5 主型=说话人对调陷阱（金标不存在于被问者）；agent 正确识破并纠错归因（未缩造），REFUSE judge 却要求字面「不知道」→ 判 WRONG。典型例：「What instrument does Caroline play?」诱答=clarinet and violin（实为 Melanie 的）；原文 D15:19-26：Caroline 弹 acoustic guitar+学 piano，agent 答对仍被判错。
+2. **多模态金标不可达（~5 题）**：locomo10.json 无 img/blip_caption（文本版），金标如「dog face cup」（原文只说 that cup）/「palm tree sunset」来自未发布的图像层——文本 replay 天花板。
+3. **金标噪声/日期推导（~5 题）**：charity race 金标「Sunday before 25 May」（=5/21）错，原文 last Saturday=5/20，agent 对；setback 发生在 9 月被问 in October。
+4. **Judge 列举超集严苛（~12 题）**：开放列举题 pred ⊇ gold 被判非「等价」。
+5. **真 miss（~5-8 题）**：细粒度未写入/检索锚错事件；反事实题拒答 vs 金标期待推断。
+
+修尺子后估算 ~0.87（+20 前提纠错 +12 超集 ≈ 173/199）。
+
+### P3.5 — 修尺子 ✅（2026-11-25，判分口径两处修订）
+- **JUDGE 改覆盖式等价**：pred 覆盖 gold 全部关键内容即 CORRECT（允许措辞差异/超集）；仅缺关键内容或矛盾才 WRONG。
+- **REFUSE 改反编造判据**：字面拒答、指出前提错误/纠正归属、部分知识拒答（拒答所问+提供相关已知事实）都算 CORRECT；把诱答给判分员对照，pred 吐诱答或编造即 WRONG。修复 LoCoMo cat5 说话人对调陷阱的全量误伤。
+- **重判脚本 scripts/rejudge.ts**（先审尺子常备工具）：重判已存 qaResults，不重跑；翻正/回退清单+byTag 对照落 rejudged.json。runner 改存全量 pred（旧 300 字截断是重判的天花板）。
+- **重判验证**：conv-1 141→149+22翻正（Adversarial 24→37，坐实主假设）；record2 149→129 但 25 回退全为截断伪影（0 个非截断回退，两数据集合计 39/39 回退皆截断可疑）——新口径在完整 pred 上零确认回归。真实修正分需重跑（P4 全量自带）。
 
 ### P4 — 全量 10 对话（2 进程并行，~25-30h 墙钟，跨 1-2 天 nohup）
 - **口径洞察**：LoCoMo 评测单元=单对话，每进程一棵完整树 → 对话级进程并行与串行**完全等价**（不同于 halumem record 内分片的 recall 低估/precision 虚高）→ GLM 限流下 2 进程安全，10 对话分 5 批或 2 路流水。

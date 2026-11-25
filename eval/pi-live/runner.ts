@@ -26,6 +26,7 @@ import { collectLeaves, recallScore, replacePrecision } from "../memory/metrics.
 import { LlmClient } from "../llm.ts";
 import { JUDGE_SYSTEM, REFUSE_SYSTEM, judgeUser, refuseUser } from "../memory/prompts.ts";
 import type { Probe, RecordCase } from "./types.ts";
+// 判分口径见 eval/memory/prompts.ts 头注：覆盖式等价 + 反编造判据（2026-11-25 修订）
 
 export interface UsageStats {
   calls: number;
@@ -169,13 +170,13 @@ export async function runPiLive(record: RecordCase, opts: PiLiveOptions): Promis
       await session.prompt(p.question);
       const pred = (session.getLastAssistantText() ?? "").trim();
       const system = p.refuse ? REFUSE_SYSTEM : JUDGE_SYSTEM;
-      const user = p.refuse ? refuseUser(p.question, pred) : judgeUser(p.question, p.answer ?? "", pred);
+      const user = p.refuse ? refuseUser(p.question, pred, p.adversarialAnswer) : judgeUser(p.question, p.answer ?? "", pred);
       const verdict = (await judge.chat(system, user, 800)).trim().toUpperCase();
       const ok = verdict.startsWith("CORRECT");
       if (ok) pass++;
       const row: Record<string, unknown> = {
         tag: p.tag, question: p.question, gold: p.refuse ? "（拒绝）" : p.answer ?? "",
-        pred: pred.slice(0, 300), ok,
+        pred, ok, // 全量留存（不截断）：重判/归因需要完整答案，见 scripts/rejudge.ts
       };
       if (p.evidence) row.evidence = p.evidence;
       if (p.adversarialAnswer) row.adversarialAnswer = p.adversarialAnswer;
