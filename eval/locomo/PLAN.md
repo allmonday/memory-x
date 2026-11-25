@@ -55,6 +55,11 @@
 - **重判脚本 scripts/rejudge.ts**（先审尺子常备工具）：重判已存 qaResults，不重跑；翻正/回退清单+byTag 对照落 rejudged.json。runner 改存全量 pred（旧 300 字截断是重判的天花板）。
 - **重判验证**：conv-1 141→149+22翻正（Adversarial 24→37，坐实主假设）；record2 149→129 但 25 回退全为截断伪影（0 个非截断回退，两数据集合计 39/39 回退皆截断可疑）——新口径在完整 pred 上零确认回归。真实修正分需重跑（P4 全量自带）。
 
+### P3.6 — conv-1 新口径重测 ✅（2026-11-25，60min，正式成绩）
+- **QA 169/199 = 0.849**（旧 0.709 → 重判下限 0.749 → 重测 0.849）；五桶 Single-hop 0.89 / Temporal 0.77 / Multi-hop 0.78 / Open-domain 0.86 / Adversarial 0.87——尺子修订主效应坐实（Adversarial +0.36、Multi-hop +0.28）；与 halumem record1 外推 0.84 / record2 0.793 同梯队，外部留出首验通过。
+- 30 失败精确归因（全量 pred）：多模态不可达 ~5 + 金标噪声 ~7 + 可答误标对抗 ~3 + judge 残留 ~4 + 真 miss ~6-8；单卷 ceiling ≈ 0.90+。详见 eval/locomo/README.md 成绩单。
+- 用户决策：P4 其余 9 对话暂停；halumem 新口径复测取消（历史分数保持旧口径作对照面）。
+
 ### P4 — 全量 10 对话（2 进程并行，~25-30h 墙钟，跨 1-2 天 nohup）
 - **口径洞察**：LoCoMo 评测单元=单对话，每进程一棵完整树 → 对话级进程并行与串行**完全等价**（不同于 halumem record 内分片的 recall 低估/precision 虚高）→ GLM 限流下 2 进程安全，10 对话分 5 批或 2 路流水。
 - 判分流量与被测同端点，计入限流预算；nohup 必须（单对话 ~6h > 30min 工具超时）。
